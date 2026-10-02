@@ -1,0 +1,1881 @@
+--[[
+	ITEM BRINGER  -  Premium Edition  (LocalScript)
+	- Select mode: คลิกชิ้นส่วนเพื่อเลือก/ยกเลิก (เลือกได้หลายชิ้น ไม่จำกัด)
+	- ESP ทะลุกำแพง + ชื่อ/ระยะ, เปลี่ยนสีได้ใน Settings
+	- I'm Feeling Lucky! หาชิ้นที่คล้าย, + Add similar เพิ่มเข้า selection
+	- BRING: ดึงทุกชิ้นเป้าหมายมาหาตัว (Grid / Circle / Stack),
+	         Return all คืนตำแหน่งเดิม, Hold at me ดึงค้างให้ตามตัวตลอด
+	- Reset Map สแกนแมพใหม่ + เลือกชิ้นที่รีสปอนกลับมาให้อัตโนมัติ
+	- Settings: สี GUI/พื้นหลัง/ขนาด, สี ESP, ระยะดึง, ระยะห่าง, ความสูง, เวลาไถล ฯลฯ
+	หมายเหตุ: การย้ายจาก LocalScript เห็นเฉพาะฝั่งเรา (client) เว้นแต่รันในเกมของตัวเอง
+	และให้ Script ฝั่งเซิร์ฟเวอร์เป็นคนสั่งย้าย
+]]
+
+local Players = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
+local RunService = game:GetService("RunService")
+local Workspace = game:GetService("Workspace")
+
+local player = Players.LocalPlayer
+local playerGui = player:WaitForChild("PlayerGui")
+local mouse = player:GetMouse()
+
+local oldGui = playerGui:FindFirstChild("ItemBringerGui")
+if oldGui then
+	oldGui:Destroy()
+end
+
+---------------------------------------------------------------------
+-- Settings
+---------------------------------------------------------------------
+local SELECTED_COLOR = Color3.fromRGB(255, 221, 0)
+local CLICK_MOVE_THRESHOLD = 5
+local ANIMATE_LIMIT = 80
+local MAX_LUCKY = 1500
+local MAX_HOLD = 300
+local HISTORY_LIMIT = 100
+local HIGHLIGHT_LIMIT = 30
+local TOGGLE_KEY = Enum.KeyCode.RightShift
+local LAYOUTS = { "Grid", "Circle", "Stack" }
+
+local S = {
+	similarTol = 0.5,
+	espFill = 0.55,
+	espOutline = 0,
+	espMaxDist = 2000,
+	espLabels = true,
+	espWalls = true,
+	autoRefind = true,
+	showSimilar = true,
+	bringSimilar = true,
+	layout = "Grid",
+	bringDist = 10,
+	spacing = 5,
+	bringHeight = 0,
+	glideTime = 0.3,
+	noCollide = true,
+	guiScale = 1,
+}
+
+local luckyColor = Color3.fromRGB(0, 255, 140)
+
+local THEME = {
+	panel = Color3.fromRGB(22, 22, 29),
+	header = Color3.fromRGB(15, 15, 20),
+	card = Color3.fromRGB(33, 33, 43),
+	button = Color3.fromRGB(46, 46, 58),
+	buttonHover = Color3.fromRGB(64, 64, 80),
+	accent = Color3.fromRGB(0, 162, 255),
+	accentHover = Color3.fromRGB(60, 188, 255),
+	accent2 = Color3.fromRGB(135, 95, 255),
+	accent2Hover = Color3.fromRGB(165, 130, 255),
+	text = Color3.fromRGB(255, 255, 255),
+	subtext = Color3.fromRGB(196, 196, 208),
+	inactive = Color3.fromRGB(135, 135, 150),
+	off = Color3.fromRGB(70, 70, 84),
+	stroke = Color3.fromRGB(80, 80, 100),
+	error = Color3.fromRGB(110, 40, 48),
+	danger = Color3.fromRGB(196, 58, 64),
+	dangerHover = Color3.fromRGB(224, 86, 92),
+}
+
+local BG_PRESETS = {
+	{ name = "Dark", panel = Color3.fromRGB(22, 22, 29), header = Color3.fromRGB(15, 15, 20), card = Color3.fromRGB(33, 33, 43), button = Color3.fromRGB(46, 46, 58), buttonHover = Color3.fromRGB(64, 64, 80), off = Color3.fromRGB(70, 70, 84) },
+	{ name = "Night", panel = Color3.fromRGB(14, 18, 32), header = Color3.fromRGB(9, 12, 24), card = Color3.fromRGB(24, 30, 50), button = Color3.fromRGB(36, 44, 70), buttonHover = Color3.fromRGB(52, 62, 98), off = Color3.fromRGB(56, 64, 90) },
+	{ name = "Gray", panel = Color3.fromRGB(32, 32, 32), header = Color3.fromRGB(20, 20, 20), card = Color3.fromRGB(44, 44, 44), button = Color3.fromRGB(60, 60, 60), buttonHover = Color3.fromRGB(80, 80, 80), off = Color3.fromRGB(84, 84, 84) },
+	{ name = "Plum", panel = Color3.fromRGB(28, 20, 40), header = Color3.fromRGB(19, 13, 29), card = Color3.fromRGB(41, 30, 58), button = Color3.fromRGB(58, 44, 80), buttonHover = Color3.fromRGB(78, 60, 106), off = Color3.fromRGB(80, 66, 100) },
+	{ name = "Moss", panel = Color3.fromRGB(18, 28, 24), header = Color3.fromRGB(12, 20, 17), card = Color3.fromRGB(27, 41, 35), button = Color3.fromRGB(38, 56, 48), buttonHover = Color3.fromRGB(52, 76, 65), off = Color3.fromRGB(62, 84, 74) },
+}
+
+local PALETTE = {
+	Color3.fromRGB(255, 221, 0), Color3.fromRGB(255, 70, 70), Color3.fromRGB(255, 150, 40),
+	Color3.fromRGB(0, 255, 140), Color3.fromRGB(0, 220, 255), Color3.fromRGB(60, 120, 255),
+	Color3.fromRGB(160, 90, 255), Color3.fromRGB(255, 100, 200), Color3.fromRGB(255, 255, 255),
+	Color3.fromRGB(170, 255, 60), Color3.fromRGB(255, 0, 170), Color3.fromRGB(0, 200, 170),
+	Color3.fromRGB(170, 110, 60), Color3.fromRGB(150, 150, 165),
+}
+
+local MODE_STYLE = {
+	Idle = { pos = UDim2.new(0, 2, 0, 2), color = Color3.fromRGB(78, 80, 98), text = Color3.fromRGB(255, 255, 255) },
+	Select = { pos = UDim2.new(0.5, 0, 0, 2), color = SELECTED_COLOR, text = Color3.fromRGB(30, 30, 30) },
+}
+
+local PANEL_W = 320
+local PANEL_H = 462
+local HEADER_H = 40
+local TABS_H = 32
+local PAGE_Y = HEADER_H + TABS_H + 6
+local PAGE_H = PANEL_H - PAGE_Y - 8
+
+---------------------------------------------------------------------
+-- Helpers
+---------------------------------------------------------------------
+local FAST = TweenInfo.new(0.15, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+local SMOOTH = TweenInfo.new(0.3, Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
+local SPRING = TweenInfo.new(0.35, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
+local PRESS = TweenInfo.new(0.08, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+local FADE = TweenInfo.new(0.2, Enum.EasingStyle.Sine, Enum.EasingDirection.Out)
+
+local function tween(obj, info, props)
+	local t = TweenService:Create(obj, info, props)
+	t:Play()
+	return t
+end
+
+-- ระบบธีม: ค่า "@key" จะผูกกับ THEME[key] และเปลี่ยนตามเมื่อแก้สี GUI
+local binds, hooks = {}, {}
+
+local function bind(inst, prop, key)
+	binds[#binds + 1] = { inst = inst, prop = prop, key = key }
+	inst[prop] = THEME[key]
+end
+
+local function col(v)
+	if type(v) == "string" then
+		return THEME[v:sub(2)]
+	end
+	return v
+end
+
+local function new(className, props, parent)
+	local inst = Instance.new(className)
+	for key, value in pairs(props) do
+		if type(value) == "string" and value:sub(1, 1) == "@" then
+			bind(inst, key, value:sub(2))
+		else
+			inst[key] = value
+		end
+	end
+	inst.Parent = parent
+	return inst
+end
+
+local function round(parent, radius)
+	return new("UICorner", { CornerRadius = UDim.new(0, radius) }, parent)
+end
+
+local function stroke(parent, color, thickness, transparency)
+	return new("UIStroke", {
+		Color = color,
+		Thickness = thickness or 1,
+		Transparency = transparency or 0,
+		ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
+	}, parent)
+end
+
+local function gradient(parent, c1, c2, rotation)
+	local g = new("UIGradient", { Rotation = rotation or 0 }, parent)
+	local function apply()
+		g.Color = ColorSequence.new(col(c1), col(c2))
+	end
+	apply()
+	if type(c1) == "string" or type(c2) == "string" then
+		hooks[#hooks + 1] = apply
+	end
+	return g
+end
+
+local function applyTheme()
+	for _, b in ipairs(binds) do
+		b.inst[b.prop] = THEME[b.key]
+	end
+	for _, fn in ipairs(hooks) do
+		fn()
+	end
+end
+
+local function setAccent(c)
+	local h, s, v = c:ToHSV()
+	THEME.accent = c
+	THEME.accentHover = c:Lerp(Color3.new(1, 1, 1), 0.3)
+	THEME.accent2 = Color3.fromHSV((h + 0.12) % 1, s, v)
+	THEME.accent2Hover = THEME.accent2:Lerp(Color3.new(1, 1, 1), 0.3)
+	applyTheme()
+end
+
+local function setBackground(preset)
+	for _, k in ipairs({ "panel", "header", "card", "button", "buttonHover", "off" }) do
+		THEME[k] = preset[k]
+	end
+	applyTheme()
+end
+
+local function addButtonFx(button, base, hover)
+	button.AutoButtonColor = false
+	if type(base) == "string" then
+		bind(button, "BackgroundColor3", base:sub(2))
+	else
+		button.BackgroundColor3 = base
+	end
+	local scale = new("UIScale", { Scale = 1 }, button)
+	button.MouseEnter:Connect(function()
+		tween(button, FAST, { BackgroundColor3 = col(hover) })
+	end)
+	button.MouseLeave:Connect(function()
+		tween(button, FAST, { BackgroundColor3 = col(base) })
+		tween(scale, FAST, { Scale = 1 })
+	end)
+	button.MouseButton1Down:Connect(function()
+		tween(scale, PRESS, { Scale = 0.94 })
+	end)
+	button.MouseButton1Up:Connect(function()
+		tween(scale, SPRING, { Scale = 1 })
+	end)
+end
+
+local function makeButton(parent, text, size, position, base, hover, font, textSize, order)
+	local b = new("TextButton", {
+		Size = size,
+		Position = position or UDim2.new(),
+		Font = font or Enum.Font.GothamMedium,
+		Text = text,
+		TextColor3 = THEME.text,
+		TextSize = textSize or 11,
+		BorderSizePixel = 0,
+		LayoutOrder = order or 0,
+	}, parent)
+	round(b, 7)
+	addButtonFx(b, base or "@button", hover or "@buttonHover")
+	return b
+end
+
+local function shortName(name)
+	if #name > 20 then
+		return name:sub(1, 18) .. "..."
+	end
+	return name
+end
+
+local function getHRP()
+	local char = player.Character
+	return char and char:FindFirstChild("HumanoidRootPart")
+end
+
+local function isPress(input)
+	return input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch
+end
+
+local function isMove(input)
+	return input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch
+end
+
+local function makeDraggable(handle, target, onTap)
+	local dragging, moved = false, false
+	local startMouse, startPos
+	handle.InputBegan:Connect(function(input)
+		if isPress(input) then
+			dragging, moved = true, false
+			startMouse = input.Position
+			startPos = target.Position
+			input.Changed:Connect(function()
+				if input.UserInputState == Enum.UserInputState.End then
+					dragging = false
+					if not moved and onTap then
+						onTap()
+					end
+				end
+			end)
+		end
+	end)
+	UserInputService.InputChanged:Connect(function(input)
+		if dragging and isMove(input) then
+			local d = input.Position - startMouse
+			if d.Magnitude > 4 then
+				moved = true
+			end
+			if moved then
+				local cam = Workspace.CurrentCamera
+				local vp = cam and cam.ViewportSize or Vector2.new(1920, 1080)
+				local sz = target.AbsoluteSize
+				local x = math.clamp(startPos.X.Offset + d.X, 0, math.max(vp.X - math.min(sz.X, 60), 0))
+				local y = math.clamp(startPos.Y.Offset + d.Y, 0, math.max(vp.Y - math.min(sz.Y, 40), 0))
+				target.Position = UDim2.fromOffset(x, y)
+			end
+		end
+	end)
+end
+
+local function makeToggle(parent, order, text, default, onChange)
+	local row = new("Frame", {
+		Size = UDim2.new(1, 0, 0, 28),
+		BackgroundColor3 = "@card",
+		BorderSizePixel = 0,
+		LayoutOrder = order,
+	}, parent)
+	round(row, 7)
+	new("TextLabel", {
+		Size = UDim2.new(1, -56, 1, 0),
+		Position = UDim2.fromOffset(10, 0),
+		BackgroundTransparency = 1,
+		Font = Enum.Font.GothamMedium,
+		Text = text,
+		TextColor3 = THEME.text,
+		TextSize = 11,
+		TextXAlignment = Enum.TextXAlignment.Left,
+	}, row)
+	local state = default
+	local sw = new("TextButton", {
+		Size = UDim2.fromOffset(34, 16),
+		AnchorPoint = Vector2.new(1, 0.5),
+		Position = UDim2.new(1, -8, 0.5, 0),
+		Text = "",
+		AutoButtonColor = false,
+		BorderSizePixel = 0,
+		BackgroundColor3 = default and THEME.accent or THEME.off,
+	}, row)
+	round(sw, 8)
+	hooks[#hooks + 1] = function()
+		sw.BackgroundColor3 = state and THEME.accent or THEME.off
+	end
+	local knob = new("Frame", {
+		Size = UDim2.fromOffset(12, 12),
+		AnchorPoint = Vector2.new(0, 0.5),
+		Position = UDim2.new(0, default and 20 or 2, 0.5, 0),
+		BackgroundColor3 = THEME.text,
+		BorderSizePixel = 0,
+	}, sw)
+	round(knob, 6)
+	local api = {}
+	function api.set(v, silent)
+		state = v
+		tween(sw, FAST, { BackgroundColor3 = v and THEME.accent or THEME.off })
+		tween(knob, FAST, { Position = UDim2.new(0, v and 20 or 2, 0.5, 0) })
+		if not silent then
+			onChange(v)
+		end
+	end
+	function api.get()
+		return state
+	end
+	sw.MouseButton1Click:Connect(function()
+		api.set(not state)
+	end)
+	return api, row
+end
+
+local function makeSlider(parent, order, text, min, max, value, step, fmt, onChange)
+	local frame = new("Frame", {
+		Size = UDim2.new(1, 0, 0, 38),
+		BackgroundColor3 = "@card",
+		BorderSizePixel = 0,
+		LayoutOrder = order,
+	}, parent)
+	round(frame, 7)
+	new("TextLabel", {
+		Size = UDim2.new(0.6, 0, 0, 18),
+		Position = UDim2.fromOffset(10, 3),
+		BackgroundTransparency = 1,
+		Font = Enum.Font.GothamMedium,
+		Text = text,
+		TextColor3 = THEME.subtext,
+		TextSize = 10,
+		TextXAlignment = Enum.TextXAlignment.Left,
+	}, frame)
+	local valueLabel = new("TextLabel", {
+		Size = UDim2.new(0.4, -10, 0, 18),
+		Position = UDim2.new(0.6, 0, 0, 3),
+		BackgroundTransparency = 1,
+		Font = Enum.Font.GothamBold,
+		Text = "",
+		TextColor3 = THEME.text,
+		TextSize = 10,
+		TextXAlignment = Enum.TextXAlignment.Right,
+	}, frame)
+	local track = new("TextButton", {
+		Size = UDim2.new(1, -20, 0, 6),
+		Position = UDim2.new(0, 10, 0, 26),
+		BackgroundColor3 = "@header",
+		Text = "",
+		AutoButtonColor = false,
+		BorderSizePixel = 0,
+	}, frame)
+	round(track, 3)
+	local fill = new("Frame", {
+		Size = UDim2.fromScale(0, 1),
+		BackgroundColor3 = THEME.text,
+		BorderSizePixel = 0,
+	}, track)
+	round(fill, 3)
+	gradient(fill, "@accent", "@accent2", 0)
+	local knob = new("Frame", {
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Size = UDim2.fromOffset(14, 14),
+		Position = UDim2.fromScale(0, 0.5),
+		BackgroundColor3 = THEME.text,
+		BorderSizePixel = 0,
+		ZIndex = 2,
+	}, track)
+	round(knob, 7)
+	stroke(knob, "@accent", 2)
+
+	local current = value
+	local dragging = false
+	local function render(v)
+		local a = (v - min) / (max - min)
+		valueLabel.Text = string.format(fmt, v)
+		fill.Size = UDim2.fromScale(a, 1)
+		knob.Position = UDim2.fromScale(a, 0.5)
+	end
+	render(value)
+
+	local function setFromX(x)
+		local a = math.clamp((x - track.AbsolutePosition.X) / math.max(track.AbsoluteSize.X, 1), 0, 1)
+		local v = min + a * (max - min)
+		v = math.clamp(math.floor(v / step + 0.5) * step, min, max)
+		if v ~= current then
+			current = v
+			render(v)
+			onChange(v)
+		end
+	end
+	track.InputBegan:Connect(function(input)
+		if isPress(input) then
+			dragging = true
+			setFromX(input.Position.X)
+		end
+	end)
+	UserInputService.InputChanged:Connect(function(input)
+		if dragging and isMove(input) then
+			setFromX(input.Position.X)
+		end
+	end)
+	UserInputService.InputEnded:Connect(function(input)
+		if isPress(input) then
+			dragging = false
+		end
+	end)
+
+	local api = { frame = frame }
+	function api.set(v)
+		current = math.clamp(v, min, max)
+		render(current)
+	end
+	return api
+end
+
+---------------------------------------------------------------------
+-- Forward declarations
+---------------------------------------------------------------------
+local scheduleRefresh, refreshStatus, openPalette, closePalette, notify, setColor
+
+---------------------------------------------------------------------
+-- UI : root + panel
+---------------------------------------------------------------------
+local screenGui = new("ScreenGui", {
+	Name = "ItemBringerGui",
+	ResetOnSpawn = false,
+	IgnoreGuiInset = true,
+	DisplayOrder = 50,
+	ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+}, playerGui)
+
+local mainFrame = new("CanvasGroup", {
+	Name = "MainFrame",
+	Size = UDim2.fromOffset(PANEL_W, PANEL_H),
+	Position = UDim2.fromOffset(86, 70),
+	BackgroundColor3 = "@panel",
+	BorderSizePixel = 0,
+	Active = true,
+	GroupTransparency = 1,
+	Visible = false,
+}, screenGui)
+round(mainFrame, 12)
+stroke(mainFrame, "@accent", 1, 0.55)
+local panelScale = new("UIScale", { Scale = 0.92 }, mainFrame)
+
+-- Header
+local titleBar = new("Frame", {
+	Name = "TitleBar",
+	Size = UDim2.new(1, 0, 0, HEADER_H),
+	BackgroundColor3 = "@header",
+	BorderSizePixel = 0,
+	Active = true,
+}, mainFrame)
+gradient(titleBar, Color3.fromRGB(255, 255, 255), Color3.fromRGB(200, 200, 215), 90)
+
+new("TextLabel", {
+	Size = UDim2.new(1, -80, 0, 20),
+	Position = UDim2.fromOffset(12, 4),
+	BackgroundTransparency = 1,
+	Font = Enum.Font.GothamBold,
+	Text = "ITEM BRINGER",
+	TextColor3 = THEME.text,
+	TextSize = 13,
+	TextXAlignment = Enum.TextXAlignment.Left,
+}, titleBar)
+new("TextLabel", {
+	Size = UDim2.new(1, -80, 0, 12),
+	Position = UDim2.fromOffset(12, 23),
+	BackgroundTransparency = 1,
+	Font = Enum.Font.Gotham,
+	Text = "PREMIUM EDITION  ·  ESP · BRING · SCAN",
+	TextColor3 = "@accent",
+	TextSize = 8,
+	TextXAlignment = Enum.TextXAlignment.Left,
+}, titleBar)
+
+local minimizeButton = makeButton(titleBar, "–", UDim2.fromOffset(22, 22), UDim2.new(1, -54, 0, 9), "@button", "@buttonHover", Enum.Font.GothamBold, 13)
+local closeButton = makeButton(titleBar, "✕", UDim2.fromOffset(22, 22), UDim2.new(1, -28, 0, 9), "@button", "@dangerHover", Enum.Font.GothamBold, 10)
+
+-- Tabs (Main / Settings)
+local tabBar = new("Frame", {
+	Size = UDim2.new(1, -16, 0, TABS_H),
+	Position = UDim2.fromOffset(8, HEADER_H + 4),
+	BackgroundColor3 = "@header",
+	BorderSizePixel = 0,
+}, mainFrame)
+round(tabBar, 8)
+
+local tabIndicator = new("Frame", {
+	Size = UDim2.new(0.5, -6, 0, 3),
+	Position = UDim2.new(0, 3, 1, -4),
+	BackgroundColor3 = THEME.text,
+	BorderSizePixel = 0,
+}, tabBar)
+round(tabIndicator, 2)
+gradient(tabIndicator, "@accent", "@accent2", 0)
+
+local TAB_NAMES = { "Main", "Settings" }
+local tabButtons, pages = {}, {}
+local currentPage = 1
+
+local function newPage()
+	return new("ScrollingFrame", {
+		Size = UDim2.new(1, -16, 0, PAGE_H),
+		Position = UDim2.fromOffset(8, PAGE_Y),
+		BackgroundTransparency = 1,
+		BorderSizePixel = 0,
+		ScrollBarThickness = 5,
+		ScrollBarImageColor3 = THEME.inactive,
+		ScrollingDirection = Enum.ScrollingDirection.Y,
+		CanvasSize = UDim2.new(),
+		AutomaticCanvasSize = Enum.AutomaticSize.Y,
+		Visible = false,
+	}, mainFrame)
+end
+
+pages[1] = newPage()
+pages[2] = newPage()
+
+local function showPage(i)
+	currentPage = i
+	for k, p in ipairs(pages) do
+		p.Visible = (k == i)
+		tween(tabButtons[k], FAST, { TextColor3 = k == i and THEME.text or THEME.inactive })
+	end
+	tween(tabIndicator, SMOOTH, { Position = UDim2.new((i - 1) * 0.5, 3, 1, -4) })
+end
+
+for i, name in ipairs(TAB_NAMES) do
+	local b = new("TextButton", {
+		Size = UDim2.new(0.5, 0, 1, -4),
+		Position = UDim2.fromScale((i - 1) * 0.5, 0),
+		BackgroundTransparency = 1,
+		Font = Enum.Font.GothamBold,
+		Text = name,
+		TextColor3 = THEME.inactive,
+		TextSize = 11,
+		AutoButtonColor = false,
+	}, tabBar)
+	b.MouseButton1Click:Connect(function()
+		showPage(i)
+	end)
+	tabButtons[i] = b
+end
+
+---------------------------------------------------------------------
+-- State
+---------------------------------------------------------------------
+local mode = "Idle"
+local scriptOn, espOn = true, true
+local pickColor = SELECTED_COLOR
+local pickSwatch, espSwatch
+
+local selected = {} -- [part] = { part, hl, box, bb, txt, color, order, conn }
+local selectedCount, selOrder = 0, 0
+local highlightCount = 0
+local pending = {} -- signatures of selections lost (respawn) waiting to be re-found
+
+local luckyMarkers, luckyParts, luckyMap = {}, {}, {}
+local luckySearched, luckyBusy = false, false
+
+local undoStack, redoStack = {}, {}
+
+local origins = {} -- [inst] = { cf, cc }  ตำแหน่งเดิมก่อนถูกดึง (cc = nil ถ้าเป็น Model)
+local holding, holdList = false, {}
+local panelOpen, minimized = false, false
+
+local pressPos, pressValid
+
+-- รายชิ้นเป้าหมายที่จะดึง: ชิ้นที่เลือกไว้ (ตามลำดับ) + ชิ้นที่คล้าย (ถ้าเปิด)
+local function getTargets()
+	local list, sel = {}, {}
+	for _, d in pairs(selected) do
+		sel[#sel + 1] = d
+	end
+	table.sort(sel, function(a, b)
+		return a.order < b.order
+	end)
+	for _, d in ipairs(sel) do
+		list[#list + 1] = d.part
+	end
+	if S.bringSimilar then
+		for _, p in ipairs(luckyParts) do
+			if p.Parent and not selected[p] then
+				list[#list + 1] = p
+			end
+		end
+	end
+	return list
+end
+
+local function allSelectedParts()
+	local list = {}
+	for p in pairs(selected) do
+		list[#list + 1] = p
+	end
+	return list
+end
+
+local function applyEspSettings()
+	for _, d in pairs(selected) do
+		if d.hl then
+			d.hl.FillTransparency = S.espFill
+			d.hl.OutlineTransparency = S.espOutline
+			d.hl.DepthMode = S.espWalls and Enum.HighlightDepthMode.AlwaysOnTop or Enum.HighlightDepthMode.Occluded
+		elseif d.box then
+			d.box.Transparency = math.clamp(S.espFill, 0.1, 1)
+			d.box.AlwaysOnTop = S.espWalls
+		end
+	end
+end
+
+local function setPickColor(c)
+	pickColor = c
+	if pickSwatch then pickSwatch.BackgroundColor3 = c end
+	if espSwatch then espSwatch.BackgroundColor3 = c end
+end
+
+local function makeColorRow(parent, order, text, startColor, onClick)
+	local row = new("Frame", {
+		Size = UDim2.new(1, 0, 0, 28),
+		BackgroundColor3 = "@card",
+		BorderSizePixel = 0,
+		LayoutOrder = order,
+	}, parent)
+	round(row, 7)
+	new("TextLabel", {
+		Size = UDim2.new(1, -60, 1, 0),
+		Position = UDim2.fromOffset(10, 0),
+		BackgroundTransparency = 1,
+		Font = Enum.Font.GothamMedium,
+		Text = text,
+		TextColor3 = THEME.text,
+		TextSize = 11,
+		TextXAlignment = Enum.TextXAlignment.Left,
+	}, row)
+	local sw = new("TextButton", {
+		Size = UDim2.fromOffset(34, 18),
+		AnchorPoint = Vector2.new(1, 0.5),
+		Position = UDim2.new(1, -8, 0.5, 0),
+		Text = "",
+		AutoButtonColor = false,
+		BackgroundColor3 = startColor,
+		BorderSizePixel = 0,
+	}, row)
+	round(sw, 6)
+	stroke(sw, THEME.text, 1, 0.5)
+	sw.MouseButton1Click:Connect(function()
+		onClick(sw)
+	end)
+	return sw
+end
+
+---------------------------------------------------------------------
+-- Page 1 : Main
+---------------------------------------------------------------------
+local main = pages[1]
+new("UIListLayout", { Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder }, main)
+new("UIPadding", { PaddingRight = UDim.new(0, 8), PaddingBottom = UDim.new(0, 8) }, main)
+
+-- status card
+local statusCard = new("Frame", {
+	Size = UDim2.new(1, 0, 0, 52),
+	BackgroundColor3 = "@header",
+	BorderSizePixel = 0,
+	LayoutOrder = 1,
+}, main)
+round(statusCard, 8)
+local statusBar = new("Frame", {
+	Size = UDim2.new(0, 4, 1, -12),
+	Position = UDim2.fromOffset(6, 6),
+	BackgroundColor3 = MODE_STYLE.Idle.color,
+	BorderSizePixel = 0,
+}, statusCard)
+round(statusBar, 2)
+local statusLabel = new("TextLabel", {
+	Size = UDim2.new(1, -24, 1, 0),
+	Position = UDim2.fromOffset(18, 0),
+	BackgroundTransparency = 1,
+	Font = Enum.Font.GothamMedium,
+	Text = "Idle\nSelecting is off",
+	TextColor3 = THEME.subtext,
+	TextSize = 11,
+	TextWrapped = true,
+	TextXAlignment = Enum.TextXAlignment.Left,
+}, statusCard)
+
+-- mode row
+local modeRow = new("Frame", { Size = UDim2.new(1, 0, 0, 28), BackgroundTransparency = 1, LayoutOrder = 2 }, main)
+local modeToggle = new("Frame", {
+	Size = UDim2.new(1, -96, 1, 0),
+	BackgroundColor3 = "@header",
+	BorderSizePixel = 0,
+}, modeRow)
+round(modeToggle, 7)
+local undoButton = makeButton(modeRow, "Undo", UDim2.new(0, 46, 1, 0), UDim2.new(1, -94, 0, 0), "@button", "@buttonHover")
+local redoButton = makeButton(modeRow, "Redo", UDim2.new(0, 46, 1, 0), UDim2.new(1, -46, 0, 0), "@button", "@buttonHover")
+undoButton.TextTransparency = 0.6
+redoButton.TextTransparency = 0.6
+
+local indicator = new("Frame", {
+	Size = UDim2.new(0.5, -2, 1, -4),
+	Position = MODE_STYLE.Idle.pos,
+	BackgroundColor3 = MODE_STYLE.Idle.color,
+	BorderSizePixel = 0,
+}, modeToggle)
+round(indicator, 6)
+
+local function makeModeButton(name, text, xScale, color)
+	return new("TextButton", {
+		Name = name,
+		Size = UDim2.fromScale(0.5, 1),
+		Position = UDim2.fromScale(xScale, 0),
+		BackgroundTransparency = 1,
+		AutoButtonColor = false,
+		Font = Enum.Font.GothamBold,
+		Text = text,
+		TextColor3 = color,
+		TextSize = 11,
+		ZIndex = 2,
+	}, modeToggle)
+end
+local idleButton = makeModeButton("IdleButton", "Idle", 0, MODE_STYLE.Idle.text)
+local selectButton = makeModeButton("SelectButton", "Select", 0.5, THEME.inactive)
+
+-- lucky
+local luckyButton = makeButton(main, "✦  I'm Feeling Lucky!", UDim2.new(1, 0, 0, 32), nil, "@accent", "@accentHover", Enum.Font.GothamBold, 12, 3)
+gradient(luckyButton, Color3.fromRGB(255, 255, 255), Color3.fromRGB(215, 225, 255), 0)
+
+-- add similar to ESP
+local addSimilarButton = makeButton(main, "+  Add similar to selection (ESP)", UDim2.new(1, 0, 0, 28), nil, "@button", "@buttonHover", Enum.Font.GothamMedium, 11, 4)
+
+-- reset / clear
+local actionRow = new("Frame", { Size = UDim2.new(1, 0, 0, 28), BackgroundTransparency = 1, LayoutOrder = 5 }, main)
+local resetButton = makeButton(actionRow, "⟳  Reset Map", UDim2.new(0.5, -3, 1, 0), nil, "@button", "@buttonHover", Enum.Font.GothamBold, 11)
+local clearButton = makeButton(actionRow, "Clear all", UDim2.new(0.5, -3, 1, 0), UDim2.new(0.5, 3, 0, 0), "@danger", "@dangerHover", Enum.Font.GothamBold, 11)
+
+-- BRING
+local bringButton = makeButton(main, "⇩  Bring all targets (0)", UDim2.new(1, 0, 0, 32), nil, "@accent2", "@accent2Hover", Enum.Font.GothamBold, 12, 6)
+
+local bringRow = new("Frame", { Size = UDim2.new(1, 0, 0, 28), BackgroundTransparency = 1, LayoutOrder = 7 }, main)
+local returnButton = makeButton(bringRow, "↺  Return all", UDim2.new(0.5, -3, 1, 0), nil, "@button", "@buttonHover", Enum.Font.GothamBold, 11)
+local layoutButton = makeButton(bringRow, "Layout: " .. S.layout, UDim2.new(0.5, -3, 1, 0), UDim2.new(0.5, 3, 0, 0), "@button", "@buttonHover", Enum.Font.GothamBold, 11)
+
+local holdToggle = makeToggle(main, 10, "Hold at me (follow)", false, function(v)
+	holding = v
+	holdList = {}
+end)
+
+pickSwatch = makeColorRow(main, 11, "New selection color", pickColor, function()
+	openPalette("New selection color", pickColor, function(c)
+		setPickColor(c)
+	end)
+end)
+
+makeToggle(main, 12, "Script power (ON/OFF)", true, function(v)
+	scriptOn = v
+	if not v then
+		mode = "Idle"
+		holdToggle.set(false)
+	end
+	if scheduleRefresh then
+		scheduleRefresh()
+	end
+end)
+local espToggle = makeToggle(main, 13, "ESP (highlight selected)", true, function(v)
+	espOn = v
+end)
+makeToggle(main, 14, "Bring similar too", true, function(v)
+	S.bringSimilar = v
+	if scheduleRefresh then
+		scheduleRefresh()
+	end
+end)
+
+new("TextLabel", {
+	Size = UDim2.new(1, 0, 0, 16),
+	BackgroundTransparency = 1,
+	Font = Enum.Font.Gotham,
+	Text = "RightShift = show/hide  ·  drag title to move",
+	TextColor3 = THEME.inactive,
+	TextSize = 9,
+	LayoutOrder = 15,
+}, main)
+
+---------------------------------------------------------------------
+-- Page 2 : Settings
+---------------------------------------------------------------------
+do
+	local setPage = pages[2]
+	new("UIListLayout", { Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder }, setPage)
+	new("UIPadding", { PaddingRight = UDim.new(0, 8), PaddingBottom = UDim.new(0, 8) }, setPage)
+
+	local orderCounter = 0
+	local function nextO()
+		orderCounter += 1
+		return orderCounter
+	end
+
+	local function sectionLabel(text)
+		new("TextLabel", {
+			Size = UDim2.new(1, 0, 0, 14),
+			BackgroundTransparency = 1,
+			Font = Enum.Font.GothamBold,
+			Text = text,
+			TextColor3 = "@accent",
+			TextSize = 10,
+			TextXAlignment = Enum.TextXAlignment.Left,
+			LayoutOrder = nextO(),
+		}, setPage)
+	end
+
+	-- GUI THEME
+	sectionLabel("GUI THEME")
+	makeColorRow(setPage, nextO(), "GUI accent color", THEME.accent, function(sw)
+		openPalette("GUI accent color", THEME.accent, function(c)
+			setAccent(c)
+			sw.BackgroundColor3 = c
+		end)
+	end)
+
+	local bgRow = new("Frame", {
+		Size = UDim2.new(1, 0, 0, 54),
+		BackgroundColor3 = "@card",
+		BorderSizePixel = 0,
+		LayoutOrder = nextO(),
+	}, setPage)
+	round(bgRow, 7)
+	new("TextLabel", {
+		Size = UDim2.new(1, -20, 0, 18),
+		Position = UDim2.fromOffset(10, 3),
+		BackgroundTransparency = 1,
+		Font = Enum.Font.GothamMedium,
+		Text = "GUI background",
+		TextColor3 = THEME.text,
+		TextSize = 11,
+		TextXAlignment = Enum.TextXAlignment.Left,
+	}, bgRow)
+	for i, preset in ipairs(BG_PRESETS) do
+		local b = new("TextButton", {
+			Size = UDim2.fromOffset(42, 24),
+			Position = UDim2.fromOffset(10 + (i - 1) * 47, 24),
+			Text = preset.name,
+			Font = Enum.Font.GothamBold,
+			TextSize = 9,
+			TextColor3 = THEME.text,
+			AutoButtonColor = false,
+			BackgroundColor3 = preset.button,
+			BorderSizePixel = 0,
+		}, bgRow)
+		round(b, 6)
+		stroke(b, preset.panel, 2, 0)
+		b.MouseButton1Click:Connect(function()
+			setBackground(preset)
+		end)
+	end
+
+	makeSlider(setPage, nextO(), "GUI size", 0.7, 1.3, S.guiScale, 0.05, "%.2f", function(v)
+		S.guiScale = v
+		if panelOpen then
+			panelScale.Scale = v
+		end
+	end)
+
+	-- ESP
+	sectionLabel("ESP  (มองทะลุกำแพงได้)")
+	espSwatch = makeColorRow(setPage, nextO(), "ESP color (all selected)", pickColor, function()
+		openPalette("ESP color (all selected)", pickColor, function(c)
+			setPickColor(c)
+			for p in pairs(selected) do
+				setColor(p, c)
+			end
+		end)
+	end)
+	makeSlider(setPage, nextO(), "Fill transparency", 0, 1, S.espFill, 0.05, "%.2f", function(v)
+		S.espFill = v
+		applyEspSettings()
+	end)
+	makeSlider(setPage, nextO(), "Outline transparency", 0, 1, S.espOutline, 0.05, "%.2f", function(v)
+		S.espOutline = v
+		applyEspSettings()
+	end)
+	makeSlider(setPage, nextO(), "Max ESP distance (studs)", 50, 10000, S.espMaxDist, 50, "%.0f", function(v)
+		S.espMaxDist = v
+	end)
+	makeToggle(setPage, nextO(), "Name + distance labels", true, function(v)
+		S.espLabels = v
+	end)
+	makeToggle(setPage, nextO(), "See through walls", true, function(v)
+		S.espWalls = v
+		applyEspSettings()
+	end)
+
+	-- BRING
+	sectionLabel("BRING")
+	makeSlider(setPage, nextO(), "Distance / circle radius (studs)", 2, 80, S.bringDist, 1, "%.0f", function(v)
+		S.bringDist = v
+	end)
+	makeSlider(setPage, nextO(), "Spacing between parts (studs)", 1, 40, S.spacing, 1, "%.0f", function(v)
+		S.spacing = v
+	end)
+	makeSlider(setPage, nextO(), "Height offset (studs)", -10, 40, S.bringHeight, 0.5, "%.1f", function(v)
+		S.bringHeight = v
+	end)
+	makeSlider(setPage, nextO(), "Glide time (s)  0 = instant", 0, 3, S.glideTime, 0.05, "%.2f", function(v)
+		S.glideTime = v
+	end)
+	makeToggle(setPage, nextO(), "No collision when brought", true, function(v)
+		S.noCollide = v
+	end)
+
+	-- SIMILAR
+	sectionLabel("SIMILAR")
+	makeSlider(setPage, nextO(), "Size tolerance (studs)", 0, 5, S.similarTol, 0.1, "%.1f", function(v)
+		S.similarTol = v
+	end)
+	makeColorRow(setPage, nextO(), "Similar marker color", luckyColor, function(sw)
+		openPalette("Similar marker color", luckyColor, function(c)
+			luckyColor = c
+			sw.BackgroundColor3 = c
+			for _, box in ipairs(luckyMarkers) do
+				box.Color3 = c
+				box.SurfaceColor3 = c
+			end
+		end)
+	end)
+	makeToggle(setPage, nextO(), "Show similar markers", true, function(v)
+		S.showSimilar = v
+		if scheduleRefresh then
+			scheduleRefresh()
+		end
+	end)
+	makeToggle(setPage, nextO(), "Auto re-select respawned items", true, function(v)
+		S.autoRefind = v
+	end)
+end
+
+---------------------------------------------------------------------
+-- Palette popup (color picker)
+---------------------------------------------------------------------
+do
+	local paletteOverlay = new("TextButton", {
+		Name = "PaletteOverlay",
+		Size = UDim2.fromScale(1, 1),
+		BackgroundColor3 = Color3.new(0, 0, 0),
+		BackgroundTransparency = 0.45,
+		Text = "",
+		AutoButtonColor = false,
+		Visible = false,
+		ZIndex = 10,
+	}, mainFrame)
+
+	local palettePanel = new("Frame", {
+		Size = UDim2.fromOffset(250, 276),
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.fromScale(0.5, 0.5),
+		BackgroundColor3 = "@panel",
+		BorderSizePixel = 0,
+		Active = true,
+		ZIndex = 11,
+	}, paletteOverlay)
+	round(palettePanel, 10)
+	stroke(palettePanel, "@accent", 1, 0.4)
+	new("UIListLayout", {
+		Padding = UDim.new(0, 6),
+		SortOrder = Enum.SortOrder.LayoutOrder,
+		HorizontalAlignment = Enum.HorizontalAlignment.Center,
+	}, palettePanel)
+	new("UIPadding", { PaddingTop = UDim.new(0, 10), PaddingLeft = UDim.new(0, 10), PaddingRight = UDim.new(0, 10) }, palettePanel)
+
+	local paletteTitle = new("TextLabel", {
+		Size = UDim2.new(1, 0, 0, 16),
+		BackgroundTransparency = 1,
+		Font = Enum.Font.GothamBold,
+		Text = "Choose color",
+		TextColor3 = THEME.text,
+		TextSize = 12,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		LayoutOrder = 1,
+	}, palettePanel)
+
+	local grid = new("Frame", { Size = UDim2.new(1, 0, 0, 58), BackgroundTransparency = 1, LayoutOrder = 2 }, palettePanel)
+	new("UIGridLayout", {
+		CellSize = UDim2.fromOffset(26, 26),
+		CellPadding = UDim2.fromOffset(6, 6),
+		FillDirectionMaxCells = 7,
+		HorizontalAlignment = Enum.HorizontalAlignment.Center,
+		SortOrder = Enum.SortOrder.LayoutOrder,
+	}, grid)
+
+	local paletteCallback
+	local pr, pg, pb = 255, 255, 255
+	local rSlider, gSlider, bSlider
+	local previewSwatch
+
+	closePalette = function()
+		paletteOverlay.Visible = false
+		paletteCallback = nil
+	end
+
+	for i, color in ipairs(PALETTE) do
+		local sw = new("TextButton", {
+			Text = "",
+			AutoButtonColor = false,
+			BackgroundColor3 = color,
+			BorderSizePixel = 0,
+			LayoutOrder = i,
+		}, grid)
+		round(sw, 7)
+		stroke(sw, THEME.text, 1, 0.65)
+		local scale = new("UIScale", { Scale = 1 }, sw)
+		sw.MouseEnter:Connect(function() tween(scale, FAST, { Scale = 1.12 }) end)
+		sw.MouseLeave:Connect(function() tween(scale, FAST, { Scale = 1 }) end)
+		sw.MouseButton1Click:Connect(function()
+			local cb = paletteCallback
+			closePalette()
+			if cb then cb(color) end
+		end)
+	end
+
+	local function updatePreview()
+		previewSwatch.BackgroundColor3 = Color3.fromRGB(pr, pg, pb)
+	end
+	rSlider = makeSlider(palettePanel, 3, "Red", 0, 255, 255, 1, "%.0f", function(v) pr = v updatePreview() end)
+	gSlider = makeSlider(palettePanel, 4, "Green", 0, 255, 255, 1, "%.0f", function(v) pg = v updatePreview() end)
+	bSlider = makeSlider(palettePanel, 5, "Blue", 0, 255, 255, 1, "%.0f", function(v) pb = v updatePreview() end)
+	for _, s in ipairs({ rSlider, gSlider, bSlider }) do
+		s.frame.Size = UDim2.new(1, 0, 0, 36)
+	end
+
+	local applyRow = new("Frame", { Size = UDim2.new(1, 0, 0, 26), BackgroundTransparency = 1, LayoutOrder = 6 }, palettePanel)
+	previewSwatch = new("Frame", {
+		Size = UDim2.new(0.35, -3, 1, 0),
+		BackgroundColor3 = Color3.fromRGB(255, 255, 255),
+		BorderSizePixel = 0,
+	}, applyRow)
+	round(previewSwatch, 7)
+	stroke(previewSwatch, THEME.text, 1, 0.5)
+	local applyButton = makeButton(applyRow, "Apply", UDim2.new(0.33, -3, 1, 0), UDim2.new(0.35, 3, 0, 0), "@accent", "@accentHover", Enum.Font.GothamBold)
+	local cancelButton = makeButton(applyRow, "Cancel", UDim2.new(0.32, -2, 1, 0), UDim2.new(0.68, 2, 0, 0), "@button", "@buttonHover")
+
+	applyButton.MouseButton1Click:Connect(function()
+		local cb = paletteCallback
+		local c = Color3.fromRGB(pr, pg, pb)
+		closePalette()
+		if cb then cb(c) end
+	end)
+	cancelButton.MouseButton1Click:Connect(function() closePalette() end)
+	paletteOverlay.MouseButton1Click:Connect(function() closePalette() end)
+
+	openPalette = function(title, startColor, callback)
+		paletteTitle.Text = title
+		paletteCallback = callback
+		pr, pg, pb = math.floor(startColor.R * 255 + 0.5), math.floor(startColor.G * 255 + 0.5), math.floor(startColor.B * 255 + 0.5)
+		rSlider.set(pr)
+		gSlider.set(pg)
+		bSlider.set(pb)
+		updatePreview()
+		paletteOverlay.Visible = true
+	end
+end
+
+---------------------------------------------------------------------
+-- Floating toggle button (draggable)
+---------------------------------------------------------------------
+local toggleBtn = new("TextButton", {
+	Name = "ToggleButton",
+	Size = UDim2.fromOffset(48, 48),
+	Position = UDim2.fromOffset(22, 180),
+	Text = "⇩",
+	Font = Enum.Font.GothamBold,
+	TextSize = 22,
+	TextColor3 = THEME.text,
+	BackgroundColor3 = THEME.accent,
+	AutoButtonColor = false,
+	BorderSizePixel = 0,
+	ZIndex = 20,
+}, screenGui)
+round(toggleBtn, 24)
+stroke(toggleBtn, THEME.text, 1.5, 0.45)
+hooks[#hooks + 1] = function()
+	toggleBtn.BackgroundColor3 = panelOpen and THEME.accent2 or THEME.accent
+end
+local toggleScale = new("UIScale", { Scale = 1 }, toggleBtn)
+local badge = new("TextLabel", {
+	Size = UDim2.fromOffset(18, 18),
+	Position = UDim2.new(1, -14, 0, -4),
+	BackgroundColor3 = "@danger",
+	Font = Enum.Font.GothamBold,
+	Text = "0",
+	TextColor3 = THEME.text,
+	TextSize = 9,
+	Visible = false,
+	ZIndex = 21,
+}, toggleBtn)
+round(badge, 9)
+toggleBtn.MouseEnter:Connect(function() tween(toggleScale, FAST, { Scale = 1.1 }) end)
+toggleBtn.MouseLeave:Connect(function() tween(toggleScale, FAST, { Scale = 1 }) end)
+
+local function setOpen(open)
+	panelOpen = open
+	if open then
+		mainFrame.Visible = true
+		tween(mainFrame, SMOOTH, { GroupTransparency = 0 })
+		tween(panelScale, SPRING, { Scale = S.guiScale })
+		tween(toggleBtn, FAST, { BackgroundColor3 = THEME.accent2 })
+	else
+		closePalette()
+		tween(mainFrame, FAST, { GroupTransparency = 1 })
+		tween(panelScale, FAST, { Scale = 0.92 })
+		tween(toggleBtn, FAST, { BackgroundColor3 = THEME.accent })
+		task.delay(0.17, function()
+			if not panelOpen then
+				mainFrame.Visible = false
+			end
+		end)
+	end
+end
+
+makeDraggable(toggleBtn, toggleBtn, function()
+	setOpen(not panelOpen)
+end)
+makeDraggable(titleBar, mainFrame, nil)
+closeButton.MouseButton1Click:Connect(function() setOpen(false) end)
+
+minimizeButton.MouseButton1Click:Connect(function()
+	minimized = not minimized
+	closePalette()
+	minimizeButton.Text = minimized and "+" or "–"
+	tabBar.Visible = not minimized
+	for _, p in ipairs(pages) do
+		p.Visible = (not minimized) and p == pages[currentPage]
+	end
+	tween(mainFrame, SMOOTH, { Size = UDim2.fromOffset(PANEL_W, minimized and HEADER_H or PANEL_H) })
+end)
+
+---------------------------------------------------------------------
+-- Status
+---------------------------------------------------------------------
+local desiredStatus = "Idle\nSelecting is off"
+local statusToken = 0
+
+local function setStatus(text)
+	if text == desiredStatus then
+		return
+	end
+	desiredStatus = text
+	statusToken += 1
+	local token = statusToken
+	task.spawn(function()
+		local out = tween(statusLabel, FAST, { TextTransparency = 1 })
+		out.Completed:Wait()
+		if token ~= statusToken then
+			return
+		end
+		statusLabel.Text = text
+		tween(statusLabel, FAST, { TextTransparency = 0 })
+	end)
+end
+
+refreshStatus = function()
+	local n, m = selectedCount, #luckyParts
+	local targets = getTargets()
+	local text
+	if not scriptOn then
+		text = "Script is OFF\nTurn on power to continue"
+	elseif holding then
+		text = ("Holding %d part(s) at you\nTurn off Hold or press Return all"):format(math.min(#targets, MAX_HOLD))
+	elseif luckySearched then
+		if m > 0 then
+			text = ("%d selected · %d similar\nPress Bring to pull them"):format(n, m)
+		else
+			text = ("%d selected\nNo similar objects found"):format(n)
+		end
+	elseif mode == "Idle" then
+		text = n == 0 and "Idle\nSelecting is off" or ("%d selected\nIdle · selecting is off"):format(n)
+	else
+		text = n == 0 and "Select mode\nClick objects to pick" or ("%d selected\nClick again to deselect"):format(n)
+	end
+	setStatus(text)
+	local barColor = (not scriptOn) and THEME.danger or MODE_STYLE[mode].color
+	tween(statusBar, FAST, { BackgroundColor3 = barColor })
+end
+
+notify = function(text, neutral)
+	if not neutral then
+		statusCard.BackgroundColor3 = THEME.error
+		tween(statusCard, TweenInfo.new(0.6, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), { BackgroundColor3 = THEME.header })
+	end
+	setStatus(text)
+	local token = statusToken
+	task.delay(2.2, function()
+		if statusToken == token then
+			refreshStatus()
+		end
+	end)
+end
+
+local function setMode(newMode)
+	if newMode == "Select" and not scriptOn then
+		notify("Turn on Script power first")
+		return
+	end
+	mode = newMode
+	local style = MODE_STYLE[newMode]
+	tween(indicator, SMOOTH, { Position = style.pos, BackgroundColor3 = style.color })
+	tween(idleButton, FAST, { TextColor3 = newMode == "Idle" and style.text or THEME.inactive })
+	tween(selectButton, FAST, { TextColor3 = newMode == "Select" and style.text or THEME.inactive })
+	refreshStatus()
+end
+idleButton.MouseButton1Click:Connect(function() setMode("Idle") end)
+selectButton.MouseButton1Click:Connect(function() setMode("Select") end)
+
+---------------------------------------------------------------------
+-- ESP / selection
+---------------------------------------------------------------------
+-- ชิ้นแรก ๆ ใช้ Highlight (มีเส้นขอบ) ชิ้นที่เกินลิมิตใช้ BoxHandleAdornment (ทะลุกำแพงได้ ไม่จำกัดจำนวน)
+local function createEsp(part, color)
+	local hl, box
+	if highlightCount < HIGHLIGHT_LIMIT then
+		hl = Instance.new("Highlight")
+		hl.Name = "IB_ESP"
+		hl.Adornee = part
+		hl.FillColor = color
+		hl.OutlineColor = color
+		hl.FillTransparency = S.espFill
+		hl.OutlineTransparency = S.espOutline
+		hl.DepthMode = S.espWalls and Enum.HighlightDepthMode.AlwaysOnTop or Enum.HighlightDepthMode.Occluded
+		hl.Parent = part
+		highlightCount += 1
+	else
+		box = Instance.new("BoxHandleAdornment")
+		box.Name = "IB_ESP_BOX"
+		box.Adornee = part
+		box.Size = part.Size
+		box.Color3 = color
+		box.Transparency = math.clamp(S.espFill, 0.1, 1)
+		box.AlwaysOnTop = S.espWalls
+		box.ZIndex = 5
+		box.Parent = part
+	end
+
+	local bb = Instance.new("BillboardGui")
+	bb.Name = "IB_LABEL"
+	bb.Adornee = part
+	bb.AlwaysOnTop = true
+	bb.Size = UDim2.fromOffset(150, 32)
+	bb.StudsOffsetWorldSpace = Vector3.new(0, part.Size.Y / 2 + 2, 0)
+	bb.LightInfluence = 0
+	bb.Parent = part
+	local txt = new("TextLabel", {
+		Size = UDim2.fromScale(1, 1),
+		BackgroundTransparency = 1,
+		Font = Enum.Font.GothamBold,
+		TextSize = 12,
+		TextColor3 = color,
+		TextStrokeTransparency = 0.3,
+		TextStrokeColor3 = Color3.new(0, 0, 0),
+		Text = shortName(part.Name),
+	}, bb)
+	return hl, box, bb, txt
+end
+
+local function syncLuckyVisibility(part)
+	local box = luckyMap[part]
+	if box and box.Parent then
+		box.Visible = scriptOn and S.showSimilar and not selected[part]
+	end
+end
+
+local function updateBadges()
+	badge.Visible = selectedCount > 0
+	badge.Text = tostring(selectedCount)
+end
+
+local function updateNav()
+	local n = #getTargets()
+	bringButton.Text = ("⇩  Bring all targets (%d)"):format(n)
+	tween(bringButton, FAST, { TextTransparency = n > 0 and 0 or 0.6 })
+end
+
+local onLost
+
+local function selectPart(part, color)
+	if not part or selected[part] or not part.Parent then
+		return false
+	end
+	color = color or pickColor
+	selOrder += 1
+	local hl, box, bb, txt = createEsp(part, color)
+	local data = { part = part, hl = hl, box = box, bb = bb, txt = txt, color = color, order = selOrder }
+	data.conn = part.AncestryChanged:Connect(function()
+		if not part:IsDescendantOf(Workspace) then
+			onLost(part)
+		end
+	end)
+	selected[part] = data
+	selectedCount += 1
+	syncLuckyVisibility(part)
+	scheduleRefresh()
+	return true
+end
+
+local function deselectPart(part)
+	local d = selected[part]
+	if not d then
+		return nil
+	end
+	selected[part] = nil
+	selectedCount -= 1
+	if d.conn then d.conn:Disconnect() end
+	if d.hl then
+		d.hl:Destroy()
+		highlightCount -= 1
+	end
+	if d.box then d.box:Destroy() end
+	if d.bb then d.bb:Destroy() end
+	syncLuckyVisibility(part)
+	scheduleRefresh()
+	return d.color
+end
+
+onLost = function(part)
+	local d = selected[part]
+	if not d then
+		return
+	end
+	origins[part] = nil
+	if S.autoRefind then
+		table.insert(pending, {
+			Name = part.Name,
+			ClassName = part.ClassName,
+			Size = part.Size,
+			Position = part.Position,
+			Color = d.color,
+		})
+		if #pending > 300 then
+			table.remove(pending, 1)
+		end
+	end
+	deselectPart(part)
+end
+
+local function matchesSig(inst, sig)
+	return inst.Name == sig.Name
+		and inst.ClassName == sig.ClassName
+		and (inst.Size - sig.Size).Magnitude < 0.25
+		and (inst.Position - sig.Position).Magnitude <= 8
+end
+
+local function tryRefind(inst)
+	if selected[inst] then
+		return false
+	end
+	for i = #pending, 1, -1 do
+		if matchesSig(inst, pending[i]) then
+			local color = pending[i].Color
+			table.remove(pending, i)
+			return selectPart(inst, color)
+		end
+	end
+	return false
+end
+
+Workspace.DescendantAdded:Connect(function(inst)
+	if not S.autoRefind or #pending == 0 or not inst:IsA("BasePart") then
+		return
+	end
+	task.delay(0.12, function()
+		if inst.Parent and #pending > 0 then
+			tryRefind(inst)
+		end
+	end)
+end)
+
+setColor = function(part, color)
+	local d = selected[part]
+	if not d then
+		return
+	end
+	d.color = color
+	if d.hl then
+		d.hl.FillColor = color
+		d.hl.OutlineColor = color
+	end
+	if d.box then
+		d.box.Color3 = color
+	end
+	d.txt.TextColor3 = color
+end
+
+-- history
+local function updateHistoryButtons()
+	tween(undoButton, FAST, { TextTransparency = #undoStack > 0 and 0 or 0.6 })
+	tween(redoButton, FAST, { TextTransparency = #redoStack > 0 and 0 or 0.6 })
+end
+
+local function pushHistory(entry)
+	if #entry.added == 0 and #entry.removed == 0 then
+		return
+	end
+	table.insert(undoStack, entry)
+	if #undoStack > HISTORY_LIMIT then
+		table.remove(undoStack, 1)
+	end
+	redoStack = {}
+	updateHistoryButtons()
+end
+
+local function applyEntry(entry, reverse)
+	local toAdd = reverse and entry.removed or entry.added
+	local toRemove = reverse and entry.added or entry.removed
+	for _, it in ipairs(toRemove) do deselectPart(it.part) end
+	for _, it in ipairs(toAdd) do selectPart(it.part, it.color) end
+end
+
+undoButton.MouseButton1Click:Connect(function()
+	local entry = table.remove(undoStack)
+	if not entry then return end
+	applyEntry(entry, true)
+	table.insert(redoStack, entry)
+	updateHistoryButtons()
+end)
+redoButton.MouseButton1Click:Connect(function()
+	local entry = table.remove(redoStack)
+	if not entry then return end
+	applyEntry(entry, false)
+	table.insert(undoStack, entry)
+	updateHistoryButtons()
+end)
+
+local function removeParts(partList)
+	local entry = { added = {}, removed = {} }
+	for _, p in ipairs(partList) do
+		local c = deselectPart(p)
+		if c then
+			table.insert(entry.removed, { part = p, color = c })
+		end
+	end
+	pushHistory(entry)
+end
+
+---------------------------------------------------------------------
+-- Lucky (similar search)
+---------------------------------------------------------------------
+local function makeBox(part, color)
+	local box = Instance.new("SelectionBox")
+	box.Name = "IB_SIMILAR"
+	box.Color3 = color
+	box.SurfaceColor3 = color
+	box.LineThickness = 0.04
+	box.Adornee = part
+	box.Parent = part
+	return box
+end
+
+local function fadeInBox(box, animate)
+	if animate then
+		box.SurfaceTransparency = 1
+		box.Transparency = 1
+		tween(box, FADE, { SurfaceTransparency = 0.8, Transparency = 0 })
+	else
+		box.SurfaceTransparency = 0.8
+		box.Transparency = 0
+	end
+end
+
+local function clearLucky()
+	local animate = #luckyMarkers <= ANIMATE_LIMIT
+	for _, box in ipairs(luckyMarkers) do
+		if animate and box.Parent then
+			local t = tween(box, FADE, { SurfaceTransparency = 1, Transparency = 1 })
+			t.Completed:Once(function() box:Destroy() end)
+		else
+			box:Destroy()
+		end
+	end
+	luckyMarkers, luckyParts, luckyMap = {}, {}, {}
+	luckySearched = false
+	updateNav()
+	scheduleRefresh()
+end
+
+local function sortedSize(p)
+	local s = p.Size
+	local t = { s.X, s.Y, s.Z }
+	table.sort(t)
+	return t
+end
+
+local function runLucky()
+	if luckyBusy then return end
+	if not scriptOn then notify("Turn on Script power first") return end
+	if selectedCount == 0 then notify("Select something first") return end
+	luckyBusy = true
+	clearLucky()
+
+	local refs = {}
+	for part in pairs(selected) do
+		table.insert(refs, {
+			cls = part.ClassName,
+			name = part.Name,
+			mesh = part:IsA("MeshPart") and part.MeshId or nil,
+			mat = part.Material,
+			col = part.Color,
+			sz = sortedSize(part),
+		})
+	end
+	local chars = {}
+	for _, pl in ipairs(Players:GetPlayers()) do
+		if pl.Character then table.insert(chars, pl.Character) end
+	end
+	local tol = S.similarTol
+
+	local found = {}
+	local all = Workspace:GetDescendants()
+	for i, inst in ipairs(all) do
+		if inst:IsA("BasePart") and not inst:IsA("Terrain") and not selected[inst] then
+			for _, ref in ipairs(refs) do
+				if inst.ClassName == ref.cls
+					and (inst.Name == ref.name or (inst.Material == ref.mat and inst.Color == ref.col))
+					and (not ref.mesh or inst.MeshId == ref.mesh)
+				then
+					local sz = sortedSize(inst)
+					if math.abs(sz[1] - ref.sz[1]) <= tol and math.abs(sz[2] - ref.sz[2]) <= tol and math.abs(sz[3] - ref.sz[3]) <= tol then
+						local inChar = false
+						for _, c in ipairs(chars) do
+							if inst:IsDescendantOf(c) then inChar = true break end
+						end
+						if not inChar then
+							table.insert(found, inst)
+						end
+						break
+					end
+				end
+			end
+			if #found >= MAX_LUCKY then break end
+		end
+		if i % 4000 == 0 then task.wait() end
+	end
+
+	local hrp = getHRP()
+	if hrp then
+		local origin = hrp.Position
+		table.sort(found, function(a, b)
+			return (a.Position - origin).Magnitude < (b.Position - origin).Magnitude
+		end)
+	end
+
+	local animate = #found <= ANIMATE_LIMIT
+	for _, part in ipairs(found) do
+		local box = makeBox(part, luckyColor)
+		fadeInBox(box, animate)
+		table.insert(luckyMarkers, box)
+		luckyMap[part] = box
+		syncLuckyVisibility(part)
+	end
+	luckyParts = found
+	luckySearched = true
+	luckyBusy = false
+	updateNav()
+	scheduleRefresh()
+	refreshStatus()
+end
+luckyButton.MouseButton1Click:Connect(runLucky)
+
+addSimilarButton.MouseButton1Click:Connect(function()
+	if #luckyParts == 0 then
+		notify("Press I'm Feeling Lucky! first")
+		return
+	end
+	local entry = { added = {}, removed = {} }
+	for _, p in ipairs(luckyParts) do
+		if selectPart(p, pickColor) then
+			table.insert(entry.added, { part = p, color = pickColor })
+		end
+	end
+	pushHistory(entry)
+	clearLucky()
+	notify(("Added %d to selection (ESP)"):format(#entry.added), true)
+end)
+
+---------------------------------------------------------------------
+-- BRING (ดึง part / Model มาหาตัว)
+---------------------------------------------------------------------
+-- คำนวณตำแหน่งของชิ้นที่ i จากทั้งหมด n ตามรูปแบบ Layout (รอบ ๆ ตัวผู้เล่น)
+local function layoutCFrame(i, n, inst, hrp)
+	local base = hrp.CFrame
+	local pv = inst:GetPivot()
+	local rot = pv - pv.Position
+	local pos
+	if S.layout == "Circle" then
+		local a = (i - 1) / math.max(n, 1) * math.pi * 2
+		pos = base.Position + Vector3.new(math.cos(a) * S.bringDist, S.bringHeight, math.sin(a) * S.bringDist)
+	elseif S.layout == "Stack" then
+		pos = (base * CFrame.new(0, S.bringHeight + (i - 1) * S.spacing, -S.bringDist)).Position
+	else -- Grid ด้านหน้าตัว
+		local cols = math.max(1, math.ceil(math.sqrt(n)))
+		local r = math.floor((i - 1) / cols)
+		local c = (i - 1) % cols
+		pos = (base * CFrame.new((c - (cols - 1) / 2) * S.spacing, S.bringHeight, -(S.bringDist + r * S.spacing))).Position
+	end
+	return CFrame.new(pos) * rot
+end
+
+-- ย้ายชิ้นเดียว (BasePart ใช้ CFrame/Tween, Model ใช้ PivotTo) และจำตำแหน่งเดิมไว้ให้ Return
+local function moveTo(inst, cf, glide)
+	if not origins[inst] then
+		origins[inst] = {
+			cf = inst:GetPivot(),
+			cc = inst:IsA("BasePart") and inst.CanCollide or nil,
+		}
+	end
+	if inst:IsA("BasePart") then
+		if S.noCollide then
+			inst.CanCollide = false
+		end
+		inst.AssemblyLinearVelocity = Vector3.zero
+		inst.AssemblyAngularVelocity = Vector3.zero
+		if glide and S.glideTime > 0.01 then
+			tween(inst, TweenInfo.new(S.glideTime, Enum.EasingStyle.Quint, Enum.EasingDirection.InOut), { CFrame = cf })
+		else
+			inst.CFrame = cf
+		end
+	else
+		inst:PivotTo(cf)
+	end
+end
+
+local function bringAll()
+	if not scriptOn then notify("Turn on Script power first") return end
+	local hrp = getHRP()
+	if not hrp then notify("Character not found") return end
+	local list = getTargets()
+	local n = #list
+	if n == 0 then notify("Select objects first") return end
+	local glide = n <= ANIMATE_LIMIT
+	local count = 0
+	for i, p in ipairs(list) do
+		if p.Parent then
+			moveTo(p, layoutCFrame(i, n, p, hrp), glide)
+			count += 1
+		end
+	end
+	notify(("Brought %d part(s)\nLayout: %s"):format(count, S.layout), true)
+end
+bringButton.MouseButton1Click:Connect(bringAll)
+
+local function returnAll()
+	holdToggle.set(false)
+	local count = 0
+	for inst, o in pairs(origins) do
+		if inst.Parent then
+			if o.cc ~= nil then
+				inst.AssemblyLinearVelocity = Vector3.zero
+				inst.AssemblyAngularVelocity = Vector3.zero
+				inst.CFrame = o.cf
+				inst.CanCollide = o.cc
+			else
+				inst:PivotTo(o.cf)
+			end
+			count += 1
+		end
+	end
+	origins = {}
+	notify(("Returned %d item(s)"):format(count), true)
+end
+returnButton.MouseButton1Click:Connect(returnAll)
+
+layoutButton.MouseButton1Click:Connect(function()
+	local idx = table.find(LAYOUTS, S.layout) or 1
+	S.layout = LAYOUTS[idx % #LAYOUTS + 1]
+	layoutButton.Text = "Layout: " .. S.layout
+end)
+
+-- Hold: ดึงค้างให้ตามตัวตลอด (อัปเดตรายการเป้าหมายทุก 0.5 วิ)
+local holdAcc = 0
+RunService.Heartbeat:Connect(function(dt)
+	if not holding or not scriptOn then return end
+	local hrp = getHRP()
+	if not hrp then return end
+	holdAcc += dt
+	if holdAcc >= 0.5 or #holdList == 0 then
+		holdAcc = 0
+		holdList = {}
+		for i, p in ipairs(getTargets()) do
+			if i > MAX_HOLD then break end
+			holdList[#holdList + 1] = p
+		end
+		refreshStatus()
+	end
+	local n = #holdList
+	for i, p in ipairs(holdList) do
+		if p.Parent then
+			moveTo(p, layoutCFrame(i, n, p, hrp), false)
+		end
+	end
+end)
+
+---------------------------------------------------------------------
+-- Clear / Reset
+---------------------------------------------------------------------
+clearButton.MouseButton1Click:Connect(function()
+	removeParts(allSelectedParts())
+	clearLucky()
+end)
+
+local rescanBusy = false
+resetButton.MouseButton1Click:Connect(function()
+	if rescanBusy then return end
+	if not scriptOn then notify("Turn on Script power first") return end
+	rescanBusy = true
+	notify("Rescanning map…", true)
+
+	for part in pairs(selected) do
+		if not part:IsDescendantOf(Workspace) then onLost(part) end
+	end
+
+	local restored = 0
+	if #pending > 0 then
+		local all = Workspace:GetDescendants()
+		for i, inst in ipairs(all) do
+			if #pending == 0 then break end
+			if inst:IsA("BasePart") and tryRefind(inst) then
+				restored += 1
+			end
+			if i % 3000 == 0 then task.wait() end
+		end
+	end
+
+	local hadLucky = luckySearched
+	clearLucky()
+	rescanBusy = false
+	if hadLucky then
+		runLucky()
+	end
+	scheduleRefresh()
+	notify(("Map rescanned\n%d restored · %d waiting"):format(restored, #pending), true)
+end)
+
+---------------------------------------------------------------------
+-- Refresh scheduling
+---------------------------------------------------------------------
+local refreshQueued = false
+scheduleRefresh = function()
+	if refreshQueued then return end
+	refreshQueued = true
+	task.defer(function()
+		refreshQueued = false
+		updateBadges()
+		updateNav()
+		for part in pairs(luckyMap) do syncLuckyVisibility(part) end
+		refreshStatus()
+	end)
+end
+
+---------------------------------------------------------------------
+-- World click + keybind
+---------------------------------------------------------------------
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+	if isPress(input) then
+		pressValid = not gameProcessed
+		pressPos = input.Position
+	elseif input.KeyCode == TOGGLE_KEY and not gameProcessed then
+		setOpen(not panelOpen)
+	end
+end)
+
+UserInputService.InputEnded:Connect(function(input)
+	if not isPress(input) or not pressValid or not pressPos then
+		return
+	end
+	pressValid = false
+	if not scriptOn or mode ~= "Select" then
+		return
+	end
+	if (input.Position - pressPos).Magnitude > CLICK_MOVE_THRESHOLD then
+		return
+	end
+	local target = mouse.Target
+	if not target or not target:IsA("BasePart") or target:IsA("Terrain") then
+		return
+	end
+	local char = player.Character
+	if char and target:IsDescendantOf(char) then
+		return
+	end
+	if selected[target] then
+		removeParts({ target })
+	else
+		if selectPart(target, pickColor) then
+			pushHistory({ added = { { part = target, color = pickColor } }, removed = {} })
+		end
+	end
+end)
+
+---------------------------------------------------------------------
+-- ESP updater (labels, distance, visibility)
+---------------------------------------------------------------------
+local acc = 0
+RunService.Heartbeat:Connect(function(dt)
+	acc += dt
+	if acc < 0.1 then return end
+	acc = 0
+	local hrp = getHRP()
+	local on = scriptOn and espOn
+	for part, d in pairs(selected) do
+		if part.Parent then
+			local dist = hrp and (part.Position - hrp.Position).Magnitude or 0
+			local visible = on and (not hrp or dist <= S.espMaxDist)
+			if d.hl then d.hl.Enabled = visible end
+			if d.box then d.box.Visible = visible end
+			d.bb.Enabled = visible and S.espLabels
+			if visible and S.espLabels and hrp then
+				d.txt.Text = ("%s\n%d studs"):format(shortName(part.Name), math.floor(dist))
+			end
+		end
+	end
+end)
+
+screenGui.Destroying:Connect(function()
+	holding = false
+	for part in pairs(selected) do
+		local d = selected[part]
+		if d.hl then d.hl:Destroy() end
+		if d.box then d.box:Destroy() end
+		if d.bb then d.bb:Destroy() end
+	end
+	for _, box in ipairs(luckyMarkers) do box:Destroy() end
+end)
+
+---------------------------------------------------------------------
+-- Init
+---------------------------------------------------------------------
+showPage(1)
+setMode("Idle")
+updateNav()
+updateHistoryButtons()
+updateBadges()
+setOpen(true)
