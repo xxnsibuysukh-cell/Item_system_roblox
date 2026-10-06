@@ -1,0 +1,608 @@
+-- Car Speed Boost v4 (compact + Auto Hover). RightShift = show/hide. Settings are saved in CarBoost/Settings.json
+-- NEW: Auto Hover. At/above the set speed (default 770 km/h) the whole car is lifted evenly 0.2-0.5 studs off the ground
+-- and wheel/body friction is cut while hovering. Releases below 95% of the set speed. (km/h = studs/s * 0.28 * 3.6)
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
+local HttpService = game:GetService("HttpService")
+local Workspace = game:GetService("Workspace")
+local player = Players.LocalPlayer
+local playerGui = player:WaitForChild("PlayerGui")
+local STEER_BIND = "CarBoostSteer"
+pcall(function() RunService:UnbindFromRenderStep(STEER_BIND) end)
+local oldGui = playerGui:FindFirstChild("CarBoostGui")
+if oldGui then oldGui:Destroy() end
+local connections = {}
+local function bind(signal, fn) local c = signal:Connect(fn) connections[#connections + 1] = c return c end
+local GUI_KEY = Enum.KeyCode.RightShift
+local DEFAULT_POS = { panel = UDim2.fromOffset(70, 120), toggle = UDim2.fromOffset(16, 140), boost = UDim2.new(1, -56, 1, -190),
+	brake = UDim2.new(1, -132, 1, -150), steerL = UDim2.new(0.5, -50, 1, -60), steerR = UDim2.new(0.5, 50, 1, -60), }
+local DEFAULTS = { maxSpeed = 200, accelMult = 1, uiScale = 1, btnSize = 60, panelTransp = 0, lockButtons = false, showBrakeBtn = true,
+	showSteerBtns = true, boostKey = Enum.KeyCode.LeftShift, brakeKey = Enum.KeyCode.B, brakeInstant = false, brakePower = 400, forceTurn = false,
+	turnRate = 1.6, steerSense = true, steerRef = 90, steerMin = 0.15, seatSteerScale = true, stabEnabled = true, stabStrength = 1, stabStartSpeed = 60,
+	gripPower = 1.2, angDamp = 1, antiFlip = true, antiFly = true, antiShake = true, antiSlide = true, antiSpin = true, boostCut = true,
+	tractionCtl = true, impactGuard = true, hoverEnabled = true, hoverKmh = 770, hoverHeight = 0.35, autoSave = true, colors = { accent = Color3.fromRGB(0, 162, 255), active = Color3.fromRGB(0, 200, 120),
+		aiBtn = Color3.fromRGB(0, 162, 255), boostBtn = Color3.fromRGB(135, 95, 255), brakeBtn = Color3.fromRGB(235, 70, 70),
+		steerBtn = Color3.fromRGB(40, 170, 190), }, }
+local function copyDefaults() local c = {} for k, v in pairs(DEFAULTS) do if k ~= "colors" then c[k] = v end end c.colors = {}
+	for k, v in pairs(DEFAULTS.colors) do c.colors[k] = v end return c end
+local cfg = copyDefaults()
+local state = { enabled = false }
+local keyHeld = { boost = false, brake = false }
+local held = { boost = false, brake = false, left = false, right = false }
+local tele = { boosting = false, braking = false, grounded = true, flat = 0, steerIn = 0, crash = false, hover = false }
+local THEME = { panel = Color3.fromRGB(22, 22, 29), header = Color3.fromRGB(15, 15, 20), card = Color3.fromRGB(33, 33, 43),
+	button = Color3.fromRGB(46, 46, 58), buttonHover = Color3.fromRGB(64, 64, 80), text = Color3.fromRGB(255, 255, 255),
+	subtext = Color3.fromRGB(196, 196, 208), desc = Color3.fromRGB(160, 160, 176), inactive = Color3.fromRGB(135, 135, 150),
+	off = Color3.fromRGB(70, 70, 84), danger = Color3.fromRGB(196, 58, 64), dangerHover = Color3.fromRGB(224, 86, 92), }
+local PALETTE = { Color3.fromRGB(255, 221, 0), Color3.fromRGB(255, 70, 70), Color3.fromRGB(255, 150, 40),
+	Color3.fromRGB(0, 255, 140), Color3.fromRGB(0, 220, 255), Color3.fromRGB(60, 120, 255),
+	Color3.fromRGB(160, 90, 255), Color3.fromRGB(255, 100, 200), Color3.fromRGB(255, 255, 255),
+	Color3.fromRGB(170, 255, 60), Color3.fromRGB(255, 0, 170), Color3.fromRGB(0, 200, 170), Color3.fromRGB(170, 110, 60), Color3.fromRGB(150, 150, 165),
+}
+local PANEL_W = 232
+local PANEL_H_MAIN = 192
+local PANEL_H_SET = 330
+local HEADER_H = 26
+local screenGui
+local posTargets, posMoved, loadedPos = {}, {}, {}
+local function viewport() local cam = Workspace.CurrentCamera return cam and cam.ViewportSize or Vector2.new(1280, 720) end
+local function markMoved(name) if name then posMoved[name] = true end end
+local function getPos(name, default, isCenter) local p = loadedPos[name] if not p then return default end local vp = viewport()
+	local x, y = p[1] * vp.X, p[2] * vp.Y if isCenter then x = math.clamp(x, 30, math.max(vp.X - 30, 30)) y = math.clamp(y, 30, math.max(vp.Y - 30, 30))
+	else x = math.clamp(x, 0, math.max(vp.X - 120, 0)) y = math.clamp(y, 0, math.max(vp.Y - 60, 0)) end return UDim2.fromOffset(x, y) end
+local CONFIG_FOLDER = "CarBoost"
+local CONFIG_PATH = CONFIG_FOLDER .. "/Settings.json"
+local MEMORY_KEY = "__CarBoostConfig"
+local CONFIG_VERSION = 2
+local hasFS = (typeof(writefile) == "function") and (typeof(readfile) == "function") and (typeof(isfile) == "function")
+local NUM_LIMITS = { accelMult = { 0.1, 5 }, uiScale = { 0.6, 1.6 }, btnSize = { 40, 120 }, panelTransp = { 0, 0.7 }, brakePower = { 20, 2000 },
+	turnRate = { 0.3, 4 }, steerRef = { 20, 400 }, steerMin = { 0.05, 0.6 }, stabStrength = { 0.3, 3 }, stabStartSpeed = { 20, 300 },
+	gripPower = { 0.3, 3 }, angDamp = { 0, 3 }, hoverKmh = { 100, 1500 }, hoverHeight = { 0.2, 0.5 }, }
+local BOOL_KEYS = { "lockButtons", "showBrakeBtn", "showSteerBtns", "brakeInstant", "forceTurn", "steerSense", "seatSteerScale",
+	"stabEnabled", "antiFlip", "antiFly", "antiShake", "antiSlide", "antiSpin", "boostCut", "tractionCtl", "impactGuard", "hoverEnabled", "autoSave", }
+local COLOR_KEYS = { "accent", "active", "aiBtn", "boostBtn", "brakeBtn", "steerBtn" }
+local KEY_FIELDS = { "boostKey", "brakeKey" }
+local saveInfo = { text = "" }
+local function round4(x) return math.floor(x * 10000 + 0.5) / 10000 end
+local function colorToTable(c) return { math.floor(c.R * 255 + 0.5), math.floor(c.G * 255 + 0.5), math.floor(c.B * 255 + 0.5) } end
+local function tableToColor(t) if type(t) ~= "table" then return nil end local r, g, b = tonumber(t[1]), tonumber(t[2]), tonumber(t[3])
+	if not (r and g and b) then return nil end return Color3.fromRGB(math.clamp(r, 0, 255), math.clamp(g, 0, 255), math.clamp(b, 0, 255)) end
+local function buildConfigData() local data = { version = CONFIG_VERSION, boostEnabled = state.enabled, boostKey = cfg.boostKey.Name,
+		brakeKey = cfg.brakeKey.Name, maxSpeed = cfg.maxSpeed, colors = {}, positions = {}, } for k in pairs(NUM_LIMITS) do data[k] = cfg[k] end
+	for _, k in ipairs(BOOL_KEYS) do data[k] = cfg[k] end for _, k in ipairs(COLOR_KEYS) do data.colors[k] = colorToTable(cfg.colors[k]) end
+	local vp = viewport() for name in pairs(posMoved) do local obj = posTargets[name] if obj and vp.X > 0 and vp.Y > 0 then local p = obj.Position
+			data.positions[name] = { round4((p.X.Scale * vp.X + p.X.Offset) / vp.X), round4((p.Y.Scale * vp.Y + p.Y.Offset) / vp.Y), } end end return data end
+local function applyConfigData(data)
+	if type(data.maxSpeed) == "number" and data.maxSpeed == data.maxSpeed and data.maxSpeed > 0 and data.maxSpeed < math.huge then
+		cfg.maxSpeed = data.maxSpeed end for k, lim in pairs(NUM_LIMITS) do local v = data[k] if type(v) == "number" and v == v then
+			cfg[k] = math.clamp(v, lim[1], lim[2]) end end for _, k in ipairs(BOOL_KEYS) do if type(data[k]) == "boolean" then cfg[k] = data[k] end end
+	if type(data.boostEnabled) == "boolean" then state.enabled = data.boostEnabled end if type(data.colors) == "table" then
+		for _, k in ipairs(COLOR_KEYS) do local c = tableToColor(data.colors[k]) if c then cfg.colors[k] = c end end end
+	for _, field in ipairs(KEY_FIELDS) do local name = data[field] if type(name) == "string" then local ok, code = pcall(function()
+				return Enum.KeyCode[name] end) if ok and code and code ~= Enum.KeyCode.Unknown and code ~= GUI_KEY then cfg[field] = code end end end
+	if cfg.boostKey == cfg.brakeKey then cfg.boostKey = DEFAULTS.boostKey cfg.brakeKey = DEFAULTS.brakeKey end if type(data.positions) == "table" then
+		for name in pairs(DEFAULT_POS) do local p = data.positions[name] if type(p) == "table" and tonumber(p[1]) and tonumber(p[2]) then
+				loadedPos[name] = { math.clamp(tonumber(p[1]), 0, 1), math.clamp(tonumber(p[2]), 0, 1) } posMoved[name] = true end end end end
+local function loadConfig() local raw if hasFS then pcall(function() if isfile(CONFIG_PATH) then raw = readfile(CONFIG_PATH) end end) else
+		pcall(function() raw = shared[MEMORY_KEY] end) end if type(raw) ~= "string" or raw == "" then return false end local ok, data = pcall(function()
+		return HttpService:JSONDecode(raw) end) if not ok or type(data) ~= "table" then return false end local applied = pcall(applyConfigData, data)
+	return applied end
+local lastEncoded = nil
+local function saveNow(force) local okEnc, encoded = pcall(function() return HttpService:JSONEncode(buildConfigData()) end) if not okEnc then
+		return false end if not force and encoded == lastEncoded then return true end local ok if hasFS then ok = pcall(function()
+			if typeof(isfolder) == "function" and typeof(makefolder) == "function" and not isfolder(CONFIG_FOLDER) then makefolder(CONFIG_FOLDER) end
+			writefile(CONFIG_PATH, encoded) end) else ok = pcall(function() shared[MEMORY_KEY] = encoded end) end if ok then lastEncoded = encoded
+		saveInfo.text = ("Saved %s -> %s"):format(os.date("%H:%M:%S"), hasFS and CONFIG_PATH or "session memory only (no file access)") else
+		saveInfo.text = "Save failed" end return ok end
+if loadConfig() then saveInfo.text = "Loaded saved config" else
+	saveInfo.text = hasFS and "No saved config yet" or "No file access: settings kept in memory only" end
+local FAST = TweenInfo.new(0.15, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+local SMOOTH = TweenInfo.new(0.3, Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
+local SPRING = TweenInfo.new(0.35, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
+local function tween(obj, info, props) local t = TweenService:Create(obj, info, props) t:Play() return t end
+local function new(className, props, parent) local inst = Instance.new(className) for key, value in pairs(props) do inst[key] = value end
+	inst.Parent = parent return inst end
+local function round(parent, radius) return new("UICorner", { CornerRadius = UDim.new(0, radius) }, parent) end
+local function stroke(parent, color, thickness, transparency) return new("UIStroke", { Color = color, Thickness = thickness or 1,
+		Transparency = transparency or 0, ApplyStrokeMode = Enum.ApplyStrokeMode.Border, }, parent) end
+local function isPress(input) return input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch end
+local function isMove(input) return input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch end
+local accentTargets = {}
+local function regAccent(inst, prop) accentTargets[#accentTargets + 1] = { inst = inst, prop = prop } inst[prop] = cfg.colors.accent end
+local function applyAccent() for _, t in ipairs(accentTargets) do t.inst[t.prop] = cfg.colors.accent end end
+local toggleRefreshers = {}
+local resetHooks = {}
+local applyAll, setOpen, setView, openPalette, closePalette, openConfirm, closeConfirm, closeOverlays
+local function makeDraggable(handle, target, onTap, posName) local dragging, moved = false, false local startInput, startPos
+	handle.InputBegan:Connect(function(input) if isPress(input) then dragging, moved = true, false startInput = input.Position startPos = target.Position
+			input.Changed:Connect(function() if input.UserInputState == Enum.UserInputState.End then dragging = false if not moved and onTap then onTap() end
+				end end) end end) bind(UserInputService.InputChanged, function(input) if dragging and isMove(input) then local d = input.Position - startInput
+			if d.Magnitude > 4 then moved = true end if moved then markMoved(posName) local vp = viewport() local sz = target.AbsoluteSize
+				local x = math.clamp(startPos.X.Offset + d.X, 0, math.max(vp.X - sz.X, 0))
+				local y = math.clamp(startPos.Y.Offset + d.Y, 0, math.max(vp.Y - sz.Y, 0)) target.Position = UDim2.fromOffset(x, y) end end end) end
+local function makeButton(parent, text, size, position, base, hover, textSize, order) local b = new("TextButton", { Size = size,
+		Position = position or UDim2.new(), Font = Enum.Font.GothamBold, Text = text, TextColor3 = THEME.text, TextSize = textSize or 10,
+		BackgroundColor3 = base, AutoButtonColor = false, BorderSizePixel = 0, LayoutOrder = order or 0, }, parent) round(b, 6)
+	b.MouseEnter:Connect(function() tween(b, FAST, { BackgroundColor3 = hover }) end) b.MouseLeave:Connect(function()
+		tween(b, FAST, { BackgroundColor3 = base }) end) return b end
+local function sectionLabel(parent, text, order) local l = new("TextLabel", { Size = UDim2.new(1, 0, 0, 12), BackgroundTransparency = 1,
+		Font = Enum.Font.GothamBold, Text = text, TextSize = 9, TextXAlignment = Enum.TextXAlignment.Left, LayoutOrder = order, }, parent)
+	regAccent(l, "TextColor3") return l end
+local function makeToggle(parent, order, text, default, onChange, desc) local row = new("Frame", { Size = UDim2.new(1, 0, 0, 24),
+		AutomaticSize = desc and Enum.AutomaticSize.Y or Enum.AutomaticSize.None, BackgroundColor3 = THEME.card, BorderSizePixel = 0, LayoutOrder = order,
+	}, parent) round(row, 6) local head = row if desc then new("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder }, row) head = new("Frame", {
+			Size = UDim2.new(1, 0, 0, 24), BackgroundTransparency = 1, LayoutOrder = 1, }, row) local d = new("TextLabel", { Size = UDim2.new(1, 0, 0, 0),
+			AutomaticSize = Enum.AutomaticSize.Y, BackgroundTransparency = 1, Font = Enum.Font.Gotham, Text = desc, TextColor3 = THEME.desc, TextSize = 9,
+			TextWrapped = true, TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top, LayoutOrder = 2, }, row)
+		new("UIPadding", { PaddingLeft = UDim.new(0, 8), PaddingRight = UDim.new(0, 8), PaddingBottom = UDim.new(0, 6), }, d) end new("TextLabel", {
+		Size = UDim2.new(1, -46, 1, 0), Position = UDim2.fromOffset(8, 0), BackgroundTransparency = 1, Font = Enum.Font.GothamMedium, Text = text,
+		TextColor3 = THEME.text, TextSize = 11, TextXAlignment = Enum.TextXAlignment.Left, }, head) local value = default local sw = new("TextButton", {
+		Size = UDim2.fromOffset(30, 14), AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -7, 0.5, 0), Text = "", AutoButtonColor = false,
+		BorderSizePixel = 0, BackgroundColor3 = value and cfg.colors.active or THEME.off, }, head) round(sw, 7) local knob = new("Frame", {
+		Size = UDim2.fromOffset(10, 10), AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, value and 18 or 2, 0.5, 0),
+		BackgroundColor3 = THEME.text, BorderSizePixel = 0, }, sw) round(knob, 5) local api = {} function api.set(v, silent) value = v
+		tween(sw, FAST, { BackgroundColor3 = value and cfg.colors.active or THEME.off })
+		tween(knob, FAST, { Position = UDim2.new(0, value and 18 or 2, 0.5, 0) }) if not silent then onChange(value) end end function api.get() return value
+	end sw.MouseButton1Click:Connect(function() api.set(not value) end) toggleRefreshers[#toggleRefreshers + 1] = function()
+		sw.BackgroundColor3 = value and cfg.colors.active or THEME.off end return api end
+local function lockScroll(inst, locked) local sf = inst:FindFirstAncestorWhichIsA("ScrollingFrame") if sf then sf.ScrollingEnabled = not locked end
+end
+local function makeSlider(parent, order, text, min, max, value, step, fmt, onChange) local frame = new("Frame", { Size = UDim2.new(1, 0, 0, 32),
+		BackgroundColor3 = THEME.card, BorderSizePixel = 0, LayoutOrder = order, }, parent) round(frame, 6) new("TextLabel", {
+		Size = UDim2.new(0.6, 0, 0, 14), Position = UDim2.fromOffset(8, 2), BackgroundTransparency = 1, Font = Enum.Font.GothamMedium, Text = text,
+		TextColor3 = THEME.subtext, TextSize = 10, TextXAlignment = Enum.TextXAlignment.Left, }, frame) local valueLabel = new("TextLabel", {
+		Size = UDim2.new(0.4, -8, 0, 14), Position = UDim2.new(0.6, 0, 0, 2), BackgroundTransparency = 1, Font = Enum.Font.GothamBold, Text = "",
+		TextColor3 = THEME.text, TextSize = 10, TextXAlignment = Enum.TextXAlignment.Right, }, frame) local track = new("TextButton", {
+		Size = UDim2.new(1, -16, 0, 5), Position = UDim2.new(0, 8, 0, 21), BackgroundColor3 = THEME.header, Text = "", AutoButtonColor = false,
+		BorderSizePixel = 0, }, frame) round(track, 3) local fill = new("Frame", { Size = UDim2.fromScale(0, 1), BorderSizePixel = 0, }, track)
+	round(fill, 3) regAccent(fill, "BackgroundColor3") local knob = new("Frame", { AnchorPoint = Vector2.new(0.5, 0.5), Size = UDim2.fromOffset(12, 12),
+		Position = UDim2.fromScale(0, 0.5), BackgroundColor3 = THEME.text, BorderSizePixel = 0, ZIndex = 2, }, track) round(knob, 6)
+	regAccent(stroke(knob, THEME.text, 2), "Color") local current = value local dragging = false local function render(v)
+		local a = (v - min) / (max - min) valueLabel.Text = string.format(fmt, v) fill.Size = UDim2.fromScale(a, 1) knob.Position = UDim2.fromScale(a, 0.5)
+	end render(value) local function setFromX(x) local a = math.clamp((x - track.AbsolutePosition.X) / math.max(track.AbsoluteSize.X, 1), 0, 1)
+		local v = min + a * (max - min) v = math.clamp(math.floor(v / step + 0.5) * step, min, max) if v ~= current then current = v render(v) onChange(v)
+		end end track.InputBegan:Connect(function(input) if isPress(input) then dragging = true lockScroll(track, true) setFromX(input.Position.X) end end)
+	bind(UserInputService.InputChanged, function(input) if dragging and isMove(input) then setFromX(input.Position.X) end end)
+	bind(UserInputService.InputEnded, function(input) if dragging and isPress(input) then dragging = false lockScroll(track, false) end end)
+	local api = { frame = frame } function api.set(v) current = math.clamp(v, min, max) render(current) end return api end
+screenGui = new("ScreenGui", { Name = "CarBoostGui", ResetOnSpawn = false, IgnoreGuiInset = true, DisplayOrder = 50,
+	ZIndexBehavior = Enum.ZIndexBehavior.Sibling, }, playerGui)
+local panelOpen = false
+local panel = new("CanvasGroup", { Name = "Panel", Size = UDim2.fromOffset(PANEL_W, PANEL_H_MAIN),
+	Position = getPos("panel", DEFAULT_POS.panel, false), BackgroundColor3 = THEME.panel, BorderSizePixel = 0, Active = true, GroupTransparency = 1,
+	Visible = false, }, screenGui)
+round(panel, 10)
+regAccent(stroke(panel, THEME.text, 1, 0.55), "Color")
+local panelScale = new("UIScale", { Scale = cfg.uiScale * 0.92 }, panel)
+posTargets.panel = panel
+local titleBar = new("Frame", { Size = UDim2.new(1, 0, 0, HEADER_H), BackgroundColor3 = THEME.header, BorderSizePixel = 0, Active = true, }, panel)
+new("TextLabel", { Size = UDim2.new(1, -74, 1, 0), Position = UDim2.fromOffset(10, 0), BackgroundTransparency = 1, Font = Enum.Font.GothamBold,
+	Text = "CAR SPEED BOOST", TextColor3 = THEME.text, TextSize = 12, TextXAlignment = Enum.TextXAlignment.Left, }, titleBar)
+local setButton = makeButton(titleBar, "SET", UDim2.fromOffset(34, 18), UDim2.new(1, -62, 0, 4), THEME.button, THEME.buttonHover, 9)
+local closeButton = makeButton(titleBar, "X", UDim2.fromOffset(18, 18), UDim2.new(1, -22, 0, 4), THEME.button, THEME.dangerHover, 9)
+local body = new("Frame", { Size = UDim2.new(1, -16, 1, -(HEADER_H + 14)), Position = UDim2.fromOffset(8, HEADER_H + 6), BackgroundTransparency = 1,
+}, panel)
+new("UIListLayout", { Padding = UDim.new(0, 5), SortOrder = Enum.SortOrder.LayoutOrder }, body)
+local statusCard = new("Frame", { Size = UDim2.new(1, 0, 0, 30), BackgroundColor3 = THEME.header, BorderSizePixel = 0, LayoutOrder = 1, }, body)
+round(statusCard, 6)
+local statusBar = new("Frame", { Size = UDim2.new(0, 3, 1, -10), Position = UDim2.fromOffset(5, 5), BackgroundColor3 = THEME.off, BorderSizePixel = 0,
+}, statusCard)
+round(statusBar, 2)
+local statusLabel = new("TextLabel", { Size = UDim2.new(1, -18, 1, 0), Position = UDim2.fromOffset(14, 0), BackgroundTransparency = 1,
+	Font = Enum.Font.GothamMedium, Text = "Vehicle: none\nSit in a vehicle seat", TextColor3 = THEME.subtext, TextSize = 10, TextWrapped = true,
+	TextXAlignment = Enum.TextXAlignment.Left, }, statusCard)
+local enabledToggle = makeToggle(body, 2, "Boost enabled", state.enabled, function(v) state.enabled = v end)
+local stabToggle = makeToggle(body, 3, "Smart stability", cfg.stabEnabled, function(v) cfg.stabEnabled = v end)
+resetHooks[#resetHooks + 1] = function() stabToggle.set(cfg.stabEnabled, true) end
+local speedRow = new("Frame", { Size = UDim2.new(1, 0, 0, 28), BackgroundColor3 = THEME.card, BorderSizePixel = 0, LayoutOrder = 4, }, body)
+round(speedRow, 6)
+new("TextLabel", { Size = UDim2.new(1, -90, 1, 0), Position = UDim2.fromOffset(8, 0), BackgroundTransparency = 1, Font = Enum.Font.GothamMedium,
+	Text = "Max speed (studs/s)", TextColor3 = THEME.subtext, TextSize = 10, TextXAlignment = Enum.TextXAlignment.Left, }, speedRow)
+local speedBox = new("TextBox", { Size = UDim2.fromOffset(76, 20), AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -6, 0.5, 0),
+	BackgroundColor3 = THEME.header, BorderSizePixel = 0, Font = Enum.Font.GothamBold, Text = tostring(cfg.maxSpeed), PlaceholderText = "speed",
+	TextColor3 = THEME.text, TextSize = 11, ClearTextOnFocus = false, }, speedRow)
+round(speedBox, 5)
+regAccent(stroke(speedBox, THEME.text, 1, 0.5), "Color")
+local function parseSpeed(text) local n = tonumber(text) if n and n == n and n > 0 and n < math.huge then return n end return nil end
+speedBox:GetPropertyChangedSignal("Text"):Connect(function() local n = parseSpeed(speedBox.Text) if n then cfg.maxSpeed = n end end)
+speedBox.FocusLost:Connect(function() local n = parseSpeed(speedBox.Text) if n then cfg.maxSpeed = n end speedBox.Text = tostring(cfg.maxSpeed) end)
+local hintLabel = new("TextLabel", { Size = UDim2.new(1, 0, 0, 20), BackgroundTransparency = 1, Font = Enum.Font.Gotham, Text = "",
+	TextColor3 = THEME.inactive, TextSize = 8, TextWrapped = true, LayoutOrder = 5, }, body)
+local function updateHint()
+	hintLabel.Text = cfg.boostKey.Name .. " = boost  |  " .. cfg.brakeKey.Name .. " = brake  |  " .. GUI_KEY.Name .. " = show/hide" end
+local settingsScroll = new("ScrollingFrame", { Size = UDim2.new(1, -12, 1, -(HEADER_H + 10)), Position = UDim2.fromOffset(6, HEADER_H + 6),
+	BackgroundTransparency = 1, BorderSizePixel = 0, ScrollBarThickness = 4, ScrollBarImageTransparency = 0.15,
+	ScrollingDirection = Enum.ScrollingDirection.Y, ElasticBehavior = Enum.ElasticBehavior.Never, CanvasSize = UDim2.new(),
+	AutomaticCanvasSize = Enum.AutomaticSize.Y, Visible = false, }, panel)
+regAccent(settingsScroll, "ScrollBarImageColor3")
+new("UIListLayout", { Padding = UDim.new(0, 5), SortOrder = Enum.SortOrder.LayoutOrder }, settingsScroll)
+new("UIPadding", { PaddingRight = UDim.new(0, 7), PaddingBottom = UDim.new(0, 4) }, settingsScroll)
+local ord = 0
+local function nextOrder() ord = ord + 1 return ord end
+local function bindToggle(text, key, desc, after) local t = makeToggle(settingsScroll, nextOrder(), text, cfg[key], function(v) cfg[key] = v
+		if after then after(v) end end, desc) resetHooks[#resetHooks + 1] = function() t.set(cfg[key], true) end return t end
+local function bindSlider(text, key, min, max, step, fmt, after)
+	local s = makeSlider(settingsScroll, nextOrder(), text, min, max, cfg[key], step, fmt, function(v) cfg[key] = v if after then after(v) end end)
+	resetHooks[#resetHooks + 1] = function() s.set(cfg[key]) end return s end
+local function refreshAll() if applyAll then applyAll() end end
+sectionLabel(settingsScroll, "BUTTONS", nextOrder())
+bindToggle("Lock buttons", "lockButtons")
+bindSlider("Button size", "btnSize", 40, 120, 2, "%.0f px", refreshAll)
+bindToggle("Show brake button", "showBrakeBtn", nil, refreshAll)
+bindToggle("Show steer buttons", "showSteerBtns", nil, refreshAll)
+local resetPosButton = makeButton(settingsScroll, "Reset positions", UDim2.new(1, 0, 0, 24), nil, THEME.button, THEME.buttonHover, 10, nextOrder())
+sectionLabel(settingsScroll, "ACCELERATION", nextOrder())
+bindSlider("Acceleration", "accelMult", 0.1, 5, 0.05, "%.2fx")
+sectionLabel(settingsScroll, "BRAKE", nextOrder())
+bindToggle("Instant stop", "brakeInstant",
+	"ON = holding the brake stops the car immediately. OFF = the car slows down gradually using the Brake power value below.", nil)
+bindSlider("Brake power", "brakePower", 20, 2000, 10, "%.0f")
+sectionLabel(settingsScroll, "STEERING", nextOrder())
+bindToggle("Speed-sensitive steering", "steerSense",
+	"Steering gets less sensitive as speed rises: 100% when slow, about 50% at the 'Steering fades at' speed, never below 'Min steering'. Makes the car easy to keep in the lane at very high speed.",
+	nil)
+bindSlider("Steering fades at", "steerRef", 20, 400, 5, "%.0f studs/s")
+bindSlider("Min steering", "steerMin", 0.05, 0.6, 0.01, "%.2f")
+bindToggle("Scale seat steering", "seatSteerScale",
+	"Also applies the speed-sensitive steering to the seat's own steering input (A/D keys, thumbstick and the < > buttons). Cars that only read VehicleSeat.Steer receive an averaged steering. Turn it off if your car steering becomes jittery.",
+	nil)
+bindToggle("Force turn", "forceTurn",
+	"ON = rotates the car body directly when the < > buttons are held. Use it for cars that ignore the normal steering input. (Plain Seat vehicles use this mode automatically.)",
+	nil)
+bindSlider("Turn rate", "turnRate", 0.3, 4, 0.1, "%.1f rad/s")
+sectionLabel(settingsScroll, "SMART STABILITY (master: main page)", nextOrder())
+bindSlider("Assist strength", "stabStrength", 0.3, 3, 0.05, "%.2fx")
+bindSlider("Assist start speed", "stabStartSpeed", 20, 300, 5, "%.0f")
+bindToggle("Anti-flip", "antiFlip",
+	"Rotates the car back upright when it tilts or is about to flip over (follows the ground slope, or world up while airborne). The correction is smoothed and rate-limited, so it never snaps the car back, and it is weakened right after a crash.")
+bindToggle("Anti-fly", "antiFly",
+	"Limits the upward launch speed and presses the car toward the ground based on its speed. Fixes the car floating, flying away or jumping too high when driving fast.")
+bindToggle("Anti-shake", "antiShake",
+	"Filters out fast vibration of the car body (bouncing up and down, rolling and pitching) while keeping slow, natural motion. The car feels smooth at very high speed.")
+bindToggle("Grip assist", "antiSlide",
+	"Pulls the car's velocity toward the way it is facing (LookVector) without losing speed, much stronger the faster you go. Fixes sliding sideways, oversteer and leaving the lane. (Turn it off if you want to drift.)")
+bindSlider("Grip strength", "gripPower", 0.3, 3, 0.05, "%.2fx")
+bindToggle("Anti-spin", "antiSpin",
+	"Damps the car's yaw spin (the rotation around the vertical axis) when you are not steering and caps it at high speed. Fixes fishtailing and the car spinning out of control.")
+bindSlider("Spin damping", "angDamp", 0, 3, 0.05, "%.2fx")
+bindToggle("Boost cut-off", "boostCut",
+	"Stops Boost from accelerating while the car is airborne or heavily tilted. Prevents the car from shooting off in the wrong direction or flipping because of acceleration in mid-air.")
+bindToggle("Traction control", "tractionCtl",
+	"Reduces the Boost acceleration while the car is sliding sideways or spinning, so the Boost no longer pushes the car deeper into a slide.")
+bindToggle("Crash guard", "impactGuard",
+	"Detects hitting a barrier or wall (a sudden loss of speed). For about a second it cuts the Boost, limits any upward launch, weakens the upright correction and damps roll and pitch, so a crash plus the assists can never throw the car into the air.")
+sectionLabel(settingsScroll, "AUTO HOVER", nextOrder())
+bindToggle("Auto hover", "hoverEnabled",
+	"When the car reaches the 'Hover at speed' value it is lifted evenly (the whole car at once, nose and tail together) just above the ground, and friction on every collidable car part is cut while hovering. This removes wheel spin, sliding and wheel rims catching on curbs. It releases smoothly when the speed drops below 95% of the value. Needs 'Max speed' set high enough to reach it (770 km/h is about 764 studs/s).")
+bindSlider("Hover at speed", "hoverKmh", 100, 1500, 10, "%.0f km/h")
+bindSlider("Hover height", "hoverHeight", 0.2, 0.5, 0.05, "%.2f studs")
+sectionLabel(settingsScroll, "INTERFACE", nextOrder())
+bindSlider("GUI size", "uiScale", 0.6, 1.6, 0.05, "%.2fx", refreshAll)
+bindSlider("Panel transparency", "panelTransp", 0, 0.7, 0.05, "%.2f", refreshAll)
+sectionLabel(settingsScroll, "COLORS", nextOrder())
+local function makeColorRow(text, key) local row = new("Frame", { Size = UDim2.new(1, 0, 0, 24), BackgroundColor3 = THEME.card, BorderSizePixel = 0,
+		LayoutOrder = nextOrder(), }, settingsScroll) round(row, 6) new("TextLabel", { Size = UDim2.new(1, -60, 1, 0), Position = UDim2.fromOffset(8, 0),
+		BackgroundTransparency = 1, Font = Enum.Font.GothamMedium, Text = text, TextColor3 = THEME.text, TextSize = 10,
+		TextXAlignment = Enum.TextXAlignment.Left, }, row) local sw = new("TextButton", { Size = UDim2.fromOffset(34, 14),
+		AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -7, 0.5, 0), Text = "", AutoButtonColor = false, BackgroundColor3 = cfg.colors[key],
+		BorderSizePixel = 0, }, row) round(sw, 5) stroke(sw, THEME.text, 1, 0.5) sw.MouseButton1Click:Connect(function()
+		openPalette(text, cfg.colors[key], function(c) cfg.colors[key] = c sw.BackgroundColor3 = c refreshAll() end) end)
+	resetHooks[#resetHooks + 1] = function() sw.BackgroundColor3 = cfg.colors[key] end end
+makeColorRow("Accent (borders, bars)", "accent")
+makeColorRow("Active (boost on)", "active")
+makeColorRow("AI button", "aiBtn")
+makeColorRow("Boost button", "boostBtn")
+makeColorRow("Brake button", "brakeBtn")
+makeColorRow("Steer buttons", "steerBtn")
+sectionLabel(settingsScroll, "CONTROLS", nextOrder())
+local rebinding = nil
+local keyButtons = {}
+local function refreshKeyButtons() for field, b in pairs(keyButtons) do b.Text = cfg[field].Name end end
+local function makeKeyRow(text, field) local row = new("Frame", { Size = UDim2.new(1, 0, 0, 24), BackgroundColor3 = THEME.card, BorderSizePixel = 0,
+		LayoutOrder = nextOrder(), }, settingsScroll) round(row, 6) new("TextLabel", { Size = UDim2.new(1, -110, 1, 0), Position = UDim2.fromOffset(8, 0),
+		BackgroundTransparency = 1, Font = Enum.Font.GothamMedium, Text = text, TextColor3 = THEME.text, TextSize = 10,
+		TextXAlignment = Enum.TextXAlignment.Left, }, row)
+	local b = makeButton(row, cfg[field].Name, UDim2.fromOffset(98, 18), UDim2.new(1, -104, 0.5, -9), THEME.button, THEME.buttonHover, 9)
+	b.MouseButton1Click:Connect(function() refreshKeyButtons() rebinding = field b.Text = "Press a key..." end) keyButtons[field] = b end
+makeKeyRow("Boost key", "boostKey")
+makeKeyRow("Brake key", "brakeKey")
+resetHooks[#resetHooks + 1] = refreshKeyButtons
+sectionLabel(settingsScroll, "SAVE CONFIG", nextOrder())
+bindToggle("Auto save", "autoSave",
+	"Automatically saves everything (settings, colors, button lock, button and panel positions) to the config file. When you run the script again or join a new map, your setup is restored.",
+	function() saveNow(true) end)
+local saveNowButton = makeButton(settingsScroll, "SAVE NOW", UDim2.new(1, 0, 0, 24), nil, THEME.button, THEME.buttonHover, 10, nextOrder())
+local saveLabel = new("TextLabel", { Size = UDim2.new(1, 0, 0, 24), BackgroundTransparency = 1, Font = Enum.Font.Gotham, Text = saveInfo.text,
+	TextColor3 = THEME.inactive, TextSize = 9, TextWrapped = true, TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top,
+	LayoutOrder = nextOrder(), }, settingsScroll)
+saveNowButton.MouseButton1Click:Connect(function() saveNow(true) saveLabel.Text = saveInfo.text end)
+sectionLabel(settingsScroll, "RESET", nextOrder())
+local resetAllButton = makeButton(settingsScroll, "RESET ALL TO DEFAULT", UDim2.new(1, 0, 0, 28), nil, THEME.danger, THEME.dangerHover, 10, nextOrder())
+local paletteOverlay = new("TextButton", { Size = UDim2.fromScale(1, 1), BackgroundColor3 = Color3.new(0, 0, 0), BackgroundTransparency = 0.45,
+	Text = "", AutoButtonColor = false, Visible = false, ZIndex = 10, }, panel)
+local palettePanel = new("Frame", { Size = UDim2.fromOffset(212, 224), AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5),
+	BackgroundColor3 = THEME.panel, BorderSizePixel = 0, Active = true, }, paletteOverlay)
+round(palettePanel, 9)
+regAccent(stroke(palettePanel, THEME.text, 1, 0.4), "Color")
+new("UIListLayout", { Padding = UDim.new(0, 5), SortOrder = Enum.SortOrder.LayoutOrder, HorizontalAlignment = Enum.HorizontalAlignment.Center,
+}, palettePanel)
+new("UIPadding", { PaddingTop = UDim.new(0, 8), PaddingLeft = UDim.new(0, 10), PaddingRight = UDim.new(0, 10) }, palettePanel)
+local paletteTitle = new("TextLabel", { Size = UDim2.new(1, 0, 0, 14), BackgroundTransparency = 1, Font = Enum.Font.GothamBold, Text = "Choose color",
+	TextColor3 = THEME.text, TextSize = 11, TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, LayoutOrder = 1,
+}, palettePanel)
+local grid = new("Frame", { Size = UDim2.new(1, 0, 0, 49), BackgroundTransparency = 1, LayoutOrder = 2 }, palettePanel)
+new("UIGridLayout", { CellSize = UDim2.fromOffset(22, 22), CellPadding = UDim2.fromOffset(5, 5), FillDirectionMaxCells = 7,
+	HorizontalAlignment = Enum.HorizontalAlignment.Center, SortOrder = Enum.SortOrder.LayoutOrder, }, grid)
+local paletteCallback
+local pr, pg, pb = 255, 255, 255
+local rSlider, gSlider, bSlider
+local previewSwatch
+closePalette = function() paletteOverlay.Visible = false paletteCallback = nil end
+for i, color in ipairs(PALETTE) do local sw = new("TextButton", { Text = "", AutoButtonColor = false, BackgroundColor3 = color, BorderSizePixel = 0,
+		LayoutOrder = i, }, grid) round(sw, 6) stroke(sw, THEME.text, 1, 0.65) sw.MouseButton1Click:Connect(function() local cb = paletteCallback
+		closePalette() if cb then cb(color) end end) end
+local function updatePreview() previewSwatch.BackgroundColor3 = Color3.fromRGB(pr, pg, pb) end
+rSlider = makeSlider(palettePanel, 3, "Red", 0, 255, 255, 1, "%.0f", function(v) pr = v updatePreview() end)
+gSlider = makeSlider(palettePanel, 4, "Green", 0, 255, 255, 1, "%.0f", function(v) pg = v updatePreview() end)
+bSlider = makeSlider(palettePanel, 5, "Blue", 0, 255, 255, 1, "%.0f", function(v) pb = v updatePreview() end)
+local applyRow = new("Frame", { Size = UDim2.new(1, 0, 0, 24), BackgroundTransparency = 1, LayoutOrder = 6 }, palettePanel)
+previewSwatch = new("Frame", { Size = UDim2.new(0.35, -3, 1, 0), BackgroundColor3 = Color3.fromRGB(255, 255, 255), BorderSizePixel = 0, }, applyRow)
+round(previewSwatch, 6)
+stroke(previewSwatch, THEME.text, 1, 0.5)
+local applyButton = makeButton(applyRow, "Apply", UDim2.new(0.33, -3, 1, 0), UDim2.new(0.35, 3, 0, 0), Color3.fromRGB(0, 140, 220), Color3.fromRGB(60, 188, 255), 10)
+local cancelButton = makeButton(applyRow, "Cancel", UDim2.new(0.32, -2, 1, 0), UDim2.new(0.68, 2, 0, 0), THEME.button, THEME.buttonHover, 10)
+applyButton.MouseButton1Click:Connect(function() local cb = paletteCallback local c = Color3.fromRGB(pr, pg, pb) closePalette() if cb then cb(c) end
+end)
+cancelButton.MouseButton1Click:Connect(function() closePalette() end)
+paletteOverlay.MouseButton1Click:Connect(function() closePalette() end)
+openPalette = function(title, startColor, callback) paletteTitle.Text = title paletteCallback = callback pr = math.floor(startColor.R * 255 + 0.5)
+	pg = math.floor(startColor.G * 255 + 0.5) pb = math.floor(startColor.B * 255 + 0.5) rSlider.set(pr) gSlider.set(pg) bSlider.set(pb) updatePreview()
+	paletteOverlay.Visible = true end
+local confirmOverlay = new("TextButton", { Size = UDim2.fromScale(1, 1), BackgroundColor3 = Color3.new(0, 0, 0), BackgroundTransparency = 0.4,
+	Text = "", AutoButtonColor = false, Visible = false, ZIndex = 30, }, panel)
+local confirmBox = new("Frame", { Size = UDim2.fromOffset(196, 122), AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5),
+	BackgroundColor3 = THEME.panel, BorderSizePixel = 0, Active = true, }, confirmOverlay)
+round(confirmBox, 9)
+stroke(confirmBox, THEME.danger, 1, 0.1)
+new("TextLabel", { Size = UDim2.new(1, -20, 0, 16), Position = UDim2.fromOffset(10, 8), BackgroundTransparency = 1, Font = Enum.Font.GothamBold,
+	Text = "Reset everything?", TextColor3 = THEME.text, TextSize = 12, TextXAlignment = Enum.TextXAlignment.Left, }, confirmBox)
+new("TextLabel", { Size = UDim2.new(1, -20, 0, 54), Position = UDim2.fromOffset(10, 27), BackgroundTransparency = 1, Font = Enum.Font.Gotham,
+	Text = "This restores ALL settings, colors, key binds, button positions and max speed to the defaults and overwrites the saved config. This cannot be undone.",
+	TextColor3 = THEME.subtext, TextSize = 10, TextWrapped = true, TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top,
+}, confirmBox)
+local confirmYes = makeButton(confirmBox, "Yes, reset", UDim2.new(0.5, -14, 0, 26), UDim2.new(0, 10, 1, -34), THEME.danger, THEME.dangerHover, 10)
+local confirmNo = makeButton(confirmBox, "Cancel", UDim2.new(0.5, -14, 0, 26), UDim2.new(0.5, 4, 1, -34), THEME.button, THEME.buttonHover, 10)
+closeConfirm = function() confirmOverlay.Visible = false end
+openConfirm = function() closePalette() confirmOverlay.Visible = true end
+closeOverlays = function() closePalette() closeConfirm() end
+confirmNo.MouseButton1Click:Connect(closeConfirm)
+confirmOverlay.MouseButton1Click:Connect(closeConfirm)
+local toggleBtn = new("TextButton", { Name = "ToggleButton", Size = UDim2.fromOffset(40, 40), Position = getPos("toggle", DEFAULT_POS.toggle, false),
+	Text = "AI", Font = Enum.Font.GothamBold, TextSize = 16, TextColor3 = THEME.text, BackgroundColor3 = cfg.colors.aiBtn, AutoButtonColor = false,
+	BorderSizePixel = 0, ZIndex = 20, }, screenGui)
+round(toggleBtn, 20)
+stroke(toggleBtn, THEME.text, 1.5, 0.45)
+local toggleScale = new("UIScale", { Scale = cfg.uiScale }, toggleBtn)
+posTargets.toggle = toggleBtn
+local toggleHover = false
+local function updateToggleScale(animate) local target = cfg.uiScale * (toggleHover and 1.1 or 1) if animate then
+		tween(toggleScale, FAST, { Scale = target }) else toggleScale.Scale = target end end
+toggleBtn.MouseEnter:Connect(function() toggleHover = true updateToggleScale(true) end)
+toggleBtn.MouseLeave:Connect(function() toggleHover = false updateToggleScale(true) end)
+local DRAG_DISTANCE = 10
+local DRAG_WINDOW = 0.4
+local holdList = {}
+local function makeHoldButton(name, holdKey, text, textSize, colorKey) local btn = new("TextButton", { Name = name,
+		Size = UDim2.fromOffset(cfg.btnSize, cfg.btnSize), AnchorPoint = Vector2.new(0.5, 0.5), Position = getPos(name, DEFAULT_POS[name], true),
+		Text = text, Font = Enum.Font.GothamBold, TextSize = textSize, TextColor3 = THEME.text, AutoButtonColor = false,
+		BackgroundColor3 = cfg.colors[colorKey], BackgroundTransparency = 0.55, BorderSizePixel = 0, ZIndex = 20, }, screenGui)
+	new("UICorner", { CornerRadius = UDim.new(0.5, 0) }, btn) stroke(btn, THEME.text, 2, 0.4) local scale = new("UIScale", { Scale = cfg.uiScale }, btn)
+	posTargets[name] = btn local function refresh() local pressed = held[holdKey] local col = cfg.colors[colorKey] local tr if name == "boost" then
+			if tele.boosting then col = cfg.colors.active end tr = (state.enabled or pressed) and 0.1 or 0.55 else tr = pressed and 0.1 or 0.5 end
+		btn.BackgroundColor3 = col btn.BackgroundTransparency = tr end
+	local drag = { candidate = false, active = false, input = nil, startInput = nil, startCenter = nil, startTime = 0 }
+	btn.InputBegan:Connect(function(input) if not isPress(input) then return end held[holdKey] = true drag.candidate = not cfg.lockButtons
+		drag.active = false drag.input = input drag.startInput = input.Position drag.startCenter = btn.AbsolutePosition + btn.AbsoluteSize / 2
+		drag.startTime = os.clock() refresh() input.Changed:Connect(function() if input.UserInputState == Enum.UserInputState.End then held[holdKey] = false
+				drag.candidate = false drag.active = false refresh() end end) end) bind(UserInputService.InputChanged, function(input)
+		if not (drag.candidate or drag.active) then return end if input ~= drag.input and input.UserInputType ~= Enum.UserInputType.MouseMovement then
+			return end local d = input.Position - drag.startInput local dist = Vector2.new(d.X, d.Y).Magnitude if drag.candidate then
+			if os.clock() - drag.startTime >= DRAG_WINDOW then drag.candidate = false elseif dist > DRAG_DISTANCE then drag.candidate = false
+				drag.active = true held[holdKey] = false markMoved(name) refresh() end end if drag.active then local vp = screenGui.AbsoluteSize
+			if vp.X <= 0 or vp.Y <= 0 then vp = viewport() end local half = btn.AbsoluteSize / 2
+			local cx = math.clamp(drag.startCenter.X + d.X, half.X, math.max(vp.X - half.X, half.X))
+			local cy = math.clamp(drag.startCenter.Y + d.Y, half.Y, math.max(vp.Y - half.Y, half.Y)) btn.Position = UDim2.fromOffset(cx, cy) end end)
+	holdList[#holdList + 1] = { btn = btn, scale = scale, refresh = refresh } return btn end
+local boostButton = makeHoldButton("boost", "boost", "", 14, "boostBtn")
+local brakeButton = makeHoldButton("brake", "brake", "BRK", 14, "brakeBtn")
+local steerLButton = makeHoldButton("steerL", "left", "<", 26, "steerBtn")
+local steerRButton = makeHoldButton("steerR", "right", ">", 26, "steerBtn")
+applyAll = function() panelScale.Scale = panelOpen and cfg.uiScale or cfg.uiScale * 0.92 if panelOpen then panel.GroupTransparency = cfg.panelTransp
+	end updateToggleScale(false) for _, h in ipairs(holdList) do h.btn.Size = UDim2.fromOffset(cfg.btnSize, cfg.btnSize) h.scale.Scale = cfg.uiScale
+		h.refresh() end brakeButton.Visible = cfg.showBrakeBtn steerLButton.Visible = cfg.showSteerBtns steerRButton.Visible = cfg.showSteerBtns
+	applyAccent() for _, f in ipairs(toggleRefreshers) do f() end updateHint() end
+setOpen = function(open) panelOpen = open if open then panel.Visible = true tween(panel, SMOOTH, { GroupTransparency = cfg.panelTransp })
+		tween(panelScale, SPRING, { Scale = cfg.uiScale }) else closeOverlays() tween(panel, FAST, { GroupTransparency = 1 })
+		tween(panelScale, FAST, { Scale = cfg.uiScale * 0.92 }) task.delay(0.17, function() if not panelOpen then panel.Visible = false end end) end end
+setView = function(view) closeOverlays() body.Visible = view == "main" settingsScroll.Visible = view == "settings"
+	setButton.Text = view == "main" and "SET" or "BACK"
+	tween(panel, SMOOTH, { Size = UDim2.fromOffset(PANEL_W, view == "main" and PANEL_H_MAIN or PANEL_H_SET) }) if view == "settings" then
+		settingsScroll.CanvasPosition = Vector2.zero end end
+local currentView = "main"
+setButton.MouseButton1Click:Connect(function() currentView = currentView == "main" and "settings" or "main" setView(currentView) end)
+closeButton.MouseButton1Click:Connect(function() setOpen(false) end)
+local function resetPositions() for name, obj in pairs(posTargets) do obj.Position = DEFAULT_POS[name] end for k in pairs(posMoved) do
+		posMoved[k] = nil end for k in pairs(loadedPos) do loadedPos[k] = nil end end
+resetPosButton.MouseButton1Click:Connect(resetPositions)
+local function resetAll() local d = copyDefaults() for k, v in pairs(d) do cfg[k] = v end state.enabled = false
+	keyHeld.boost, keyHeld.brake = false, false held.boost, held.brake, held.left, held.right = false, false, false, false rebinding = nil
+	resetPositions() enabledToggle.set(false, true) speedBox.Text = tostring(cfg.maxSpeed) for _, hook in ipairs(resetHooks) do hook() end applyAll()
+	saveNow(true) end
+resetAllButton.MouseButton1Click:Connect(openConfirm)
+confirmYes.MouseButton1Click:Connect(function() closeConfirm() resetAll() end)
+makeDraggable(toggleBtn, toggleBtn, function() setOpen(not panelOpen) end, "toggle")
+makeDraggable(titleBar, panel, nil, "panel")
+local function getSeat() local char = player.Character local hum = char and char:FindFirstChildOfClass("Humanoid") return hum and hum.SeatPart or nil
+end
+local function boostHeld() return keyHeld.boost or held.boost end
+local function brakeHeld() return keyHeld.brake or held.brake end
+local curSeat = nil
+local lastSeat, rayParams = nil, nil
+local restOffset, orientOK = 3, true
+local lpVy, lpW = 0, Vector3.zero
+local flipSign = 1
+local IMPACT_TIME = 0.9
+local MAX_TILT_W = 3.5
+local prevVel = nil
+local impactT, impactVy = 0, 0
+local alignGain = 1
+local normalS = Vector3.yAxis
+-- Auto hover state (one table + two functions, to stay under Luau's 200-locals limit)
+local hover = { on = false, blend = 0, gy = nil, gv = 0, parts = {}, orig = {}, fric = false, K = 0.28 * 3.6 } -- K: studs/s -> km/h
+local function setHoverFriction(on) if on == hover.fric then return end hover.fric = on for i = #hover.parts, 1, -1 do local p = hover.parts[i]
+		if p.Parent then pcall(function() if on then local cur = p.CurrentPhysicalProperties hover.orig[p] = { v = p.CustomPhysicalProperties }
+				p.CustomPhysicalProperties = PhysicalProperties.new(cur.Density, 0, cur.Elasticity, 100, cur.ElasticityWeight)
+			elseif hover.orig[p] then p.CustomPhysicalProperties = hover.orig[p].v hover.orig[p] = nil end end) end end
+	if not on then hover.orig = {} end end
+local function collectHoverParts(seat) hover.parts, hover.orig, hover.fric = {}, {}, false local seen = {} local function add(d)
+		if d:IsA("BasePart") and d.CanCollide and not seen[d] and #hover.parts < 600 then seen[d] = true hover.parts[#hover.parts + 1] = d end end
+	local ok, conn = pcall(function() return seat:GetConnectedParts(true) end) if ok and type(conn) == "table" then for _, d in ipairs(conn) do add(d) end end
+	local model = seat:FindFirstAncestorOfClass("Model") if model then local desc = model:GetDescendants() if #desc <= 1500 then
+			for _, d in ipairs(desc) do add(d) end end end end
+local function resetStabilityState() prevVel = nil impactT, impactVy = 0, 0 alignGain = 1 normalS = Vector3.yAxis flipSign = 1
+	hover.on, hover.blend, hover.gy, hover.gv = false, 0, nil, 0 end
+local function steerFactor(speed) if not cfg.steerSense then return 1 end local r = speed / math.max(cfg.steerRef, 1)
+	return math.max(1 / (1 + r * r), cfg.steerMin) end
+local function bottomY(part) local cf, s = part.CFrame, part.Size local r, u, l = cf.RightVector, cf.UpVector, cf.LookVector
+	local ext = (math.abs(r.Y) * s.X + math.abs(u.Y) * s.Y + math.abs(l.Y) * s.Z) * 0.5 return cf.Position.Y - ext end
+local function setupVehicle(seat, root) orientOK = seat.CFrame.UpVector.Y > 0.6 local model = seat:FindFirstAncestorOfClass("Model") local depth = 0
+	while model and model.Parent and model.Parent ~= Workspace and model.Parent:IsA("Model") and depth < 3 do model = model.Parent depth = depth + 1 end
+	rayParams = RaycastParams.new() rayParams.FilterType = Enum.RaycastFilterType.Exclude rayParams.RespectCanCollide = true
+	local ignore = { model or seat } if player.Character then ignore[#ignore + 1] = player.Character end rayParams.FilterDescendantsInstances = ignore
+	local base = root or seat local lowest = math.huge local function scan(list) local n = 0 for _, d in ipairs(list) do
+			if d:IsA("BasePart") and d.CanCollide then local y = bottomY(d) if y < lowest then lowest = y end n = n + 1 if n > 2500 then break end end end end
+	local okParts, connected = pcall(function() return seat:GetConnectedParts(true) end) if okParts and type(connected) == "table" then scan(connected)
+	end if model then local desc = model:GetDescendants() if #desc <= 1500 then scan(desc) end end restOffset = 3 if lowest < math.huge then
+		restOffset = math.clamp(base.Position.Y - lowest, 0.5, 25) end lpVy = base.AssemblyLinearVelocity.Y lpW = Vector3.zero end
+local function driveVehicle(seat, root, dt) local vel = root.AssemblyLinearVelocity local w = root.AssemblyAngularVelocity
+	local dirtyV, dirtyW = false, false local speed0 = vel.Magnitude local vy0 = vel.Y local rest0 = Vector3.new(w.X, 0, w.Z) local cfv = seat.CFrame
+	local upv = cfv.UpVector local look = cfv.LookVector local upDot = upv.Y local stab = cfg.stabEnabled and orientOK local str = cfg.stabStrength
+	local guard = cfg.stabEnabled and cfg.impactGuard if guard and prevVel then local pf = Vector3.new(prevVel.X, 0, prevVel.Z)
+		local nf = Vector3.new(vel.X, 0, vel.Z) local pm = pf.Magnitude if pm > 25 then local drop = pm - nf.Magnitude local change = (nf - pf).Magnitude
+			local d = math.max(dt, 0.008) if (drop / d > 700 and drop > pm * 0.18) or (change / d > 900 and change > pm * 0.25) then impactT = IMPACT_TIME
+				impactVy = math.max(prevVel.Y, 0) end end end if not guard then impactT = 0 end local impactF = 0 if impactT > 0 then
+		impactT = math.max(impactT - dt, 0) impactF = impactT / IMPACT_TIME end tele.crash = impactF > 0 local grounded, normal = true, Vector3.yAxis
+	if stab and rayParams then local res = Workspace:Raycast(root.Position, Vector3.new(0, -80, 0), rayParams) local gap = 999 if res then
+			gap = res.Distance - restOffset * math.max(upDot, 0.3) if res.Normal.Y > 0.5 then normal = res.Normal end end grounded = gap < 3.5 end
+	tele.grounded = grounded local fwd = Vector3.new(look.X, 0, look.Z) local hasFwd = fwd.Magnitude > 0.1 if hasFwd then fwd = fwd.Unit end
+	local right = hasFwd and fwd:Cross(Vector3.yAxis) or Vector3.zero local flat0v = Vector3.new(vel.X, 0, vel.Z) local flat0 = flat0v.Magnitude
+	local slip0 = 0 if hasFwd and flat0 > 8 then slip0 = math.min(math.abs(flat0v:Dot(right)) / flat0, 1) end local braking = brakeHeld()
+	local boosting = state.enabled and boostHeld() and (not braking) and hasFwd if boosting and impactF > 0 then boosting = false end
+	if boosting and stab and cfg.boostCut and ((not grounded) or upDot < 0.7) then boosting = false end if boosting then local bf = fwd
+		if seat:IsA("VehicleSeat") and seat.ThrottleFloat < 0 then bf = -fwd end local along = Vector3.new(vel.X, 0, vel.Z):Dot(bf)
+		local remaining = cfg.maxSpeed - along if remaining > 0 then local traction = 1 if stab and cfg.tractionCtl then
+				traction = math.clamp(1 - slip0 * 1.6 - math.clamp(math.abs(w.Y) / 3, 0, 1) * 0.5, 0, 1) end
+			local accel = math.max(remaining * 1.5, cfg.maxSpeed * 0.1) * cfg.accelMult * traction local step = math.min(accel * dt, remaining)
+			vel = vel + bf * step dirtyV = true end end if braking and grounded then if cfg.brakeInstant then vel = Vector3.new(0, vel.Y, 0) w = Vector3.zero
+			dirtyW = true else local flat = Vector3.new(vel.X, 0, vel.Z) local m = flat.Magnitude if m > 0.05 then
+				local nm = math.max(m - cfg.brakePower * dt, 0) local nf = flat / m * nm vel = Vector3.new(nf.X, vel.Y, nf.Z) else vel = Vector3.new(0, vel.Y, 0)
+			end end dirtyV = true end local flatVel = Vector3.new(vel.X, 0, vel.Z) local flatSpeed = flatVel.Magnitude
+	local along = hasFwd and flatVel:Dot(fwd) or 0 local steerDir = (held.right and 1 or 0) - (held.left and 1 or 0)
+	local forceTurn = cfg.forceTurn or not seat:IsA("VehicleSeat") if steerDir ~= 0 and forceTurn and hasFwd and grounded then
+		local mobility = math.clamp(along / 15, -1, 1) local rate = cfg.turnRate * steerFactor(flatSpeed) local yaw = -steerDir * rate * mobility
+		w = Vector3.new(w.X, yaw, w.Z) vel = CFrame.Angles(0, yaw * dt, 0):VectorToWorldSpace(vel) dirtyW = true dirtyV = true end if stab then
+		local sf = math.clamp(vel.Magnitude / math.max(cfg.stabStartSpeed, 1), 0, 3) local a = 1 - math.exp(-dt * 10) lpVy = lpVy + (vy0 - lpVy) * a
+		lpW = lpW:Lerp(rest0, a) local targetN = grounded and normal or Vector3.yAxis normalS = normalS:Lerp(targetN, 1 - math.exp(-8 * dt))
+		if normalS.Magnitude > 0.01 then normalS = normalS.Unit else normalS = Vector3.yAxis end if cfg.antiFlip then local targetGain = 1 - 0.8 * impactF
+			alignGain = alignGain + (targetGain - alignGain) * (1 - math.exp(-5 * dt)) local align = upv:Dot(normalS) if align < 0.978 then local axis
+				if align > -0.6 then axis = upv:Cross(normalS) else local s = look:Dot(upv:Cross(normalS)) if math.abs(s) > 0.05 then flipSign = s > 0 and 1 or -1
+					end axis = look * flipSign end local k = 9 * str * (grounded and 1 or 0.6) * alignGain if align < 0.3 then k = k * 1.8 end
+				local add = axis * (k * dt) if add.Magnitude > 0.12 then add = add.Unit * 0.12 end w = w + add local yawPart = Vector3.new(0, w.Y, 0)
+				w = yawPart + (w - yawPart) * (1 - math.clamp(3.5 * str * dt, 0, 0.9)) local tilt = Vector3.new(w.X, 0, w.Z) if tilt.Magnitude > MAX_TILT_W then
+					tilt = tilt.Unit * MAX_TILT_W w = Vector3.new(tilt.X, w.Y, tilt.Z) end dirtyW = true end end if cfg.antiShake then
+			local k = math.clamp(0.35 * str * sf, 0, 0.7) if k > 0 then vel = Vector3.new(vel.X, vel.Y - (vy0 - lpVy) * k, vel.Z)
+				local rest = Vector3.new(w.X, 0, w.Z) rest = rest - (rest0 - lpW) * k w = Vector3.new(rest.X, w.Y, rest.Z) dirtyV = true dirtyW = true end end
+		if cfg.antiFly then if not grounded then local maxUp = (30 + flatSpeed * 0.1) / str if vel.Y > maxUp then vel = Vector3.new(vel.X, maxUp, vel.Z) end
+			end local down = math.min(35 * str * sf, 120) if not grounded then down = down + 45 * str * math.clamp(sf, 0.3, 2) end if down > 0 then
+				vel = vel - Vector3.yAxis * (down * dt) end dirtyV = true end if cfg.antiSlide and grounded and hasFwd then
+			local fv = Vector3.new(vel.X, 0, vel.Z) local m = fv.Magnitude if m > 6 then local sgn = (fv:Dot(fwd) < -0.2 * m) and -1 or 1
+				local rate = cfg.gripPower * str * (2 + 4 * sf) * (1 - 0.6 * impactF) local kk = 1 - math.exp(-rate * dt) local dirNow = fv / m
+				local blend = dirNow:Lerp(fwd * sgn, kk) if blend.Magnitude > 0.01 then local slip = math.min(math.abs(fv:Dot(right)) / m, 1)
+					local newM = m * (1 - 0.08 * kk * slip) local nv = blend.Unit * newM vel = Vector3.new(nv.X, vel.Y, nv.Z) dirtyV = true end end end
+		if cfg.antiSpin then local steerAmt = math.abs(tele.steerIn) if steerDir ~= 0 then steerAmt = 1 end
+			local fastF = math.clamp((flatSpeed - 40) / 120, 0, 1.5) if fastF > 0 and cfg.angDamp > 0 then
+				local rate = cfg.angDamp * fastF * (steerAmt > 0.1 and 1.0 or 4.0) w = Vector3.new(w.X, w.Y * math.exp(-rate * dt), w.Z) dirtyW = true end
+			local maxYaw = math.max(4 / (1 + flatSpeed / 70) / str, 0.3) if math.abs(w.Y) > maxYaw then local cap = maxYaw * (w.Y > 0 and 1 or -1)
+				local newY = cap + (w.Y - cap) * math.exp(-14 * dt) w = Vector3.new(w.X, newY, w.Z) dirtyW = true end end end if guard and impactF > 0 then
+		local maxUp = impactVy + 6 + (1 - impactF) * 25 if vel.Y > maxUp then vel = Vector3.new(vel.X, maxUp, vel.Z) dirtyV = true end
+		local tilt = Vector3.new(w.X, 0, w.Z) * math.exp(-5 * impactF * dt) if tilt.Magnitude > MAX_TILT_W then tilt = tilt.Unit * MAX_TILT_W end
+		w = Vector3.new(tilt.X, w.Y, tilt.Z) dirtyW = true end
+	-- AUTO HOVER: at/above hoverKmh lift the whole car evenly by hoverHeight (0.2-0.5 studs) and cut friction on all car parts
+	local hovering = false
+	if cfg.hoverEnabled and rayParams then local kmh = Vector3.new(vel.X, 0, vel.Z).Magnitude * hover.K
+		if hover.on then if kmh < cfg.hoverKmh * 0.95 then hover.on = false end elseif kmh >= cfg.hoverKmh then hover.on = true end else hover.on = false end
+	hover.blend = math.clamp(hover.blend + (hover.on and dt or -dt) / 0.8, 0, 1)
+	setHoverFriction(hover.blend > 0)
+	if hover.blend > 0 and impactF <= 0 and upDot > 0.5 and rayParams then
+		local hres = Workspace:Raycast(root.Position, Vector3.new(0, -60, 0), rayParams)
+		if hres then local gap = hres.Distance - restOffset * math.max(upDot, 0.3)
+			if gap < 4 then local gy = hres.Position.Y
+				if hover.gy then local raw = math.clamp((gy - hover.gy) / math.max(dt, 0.004), -150, 150) hover.gv = hover.gv + (raw - hover.gv) * (1 - math.exp(-dt * 25))
+				else hover.gv = 0 end hover.gy = gy
+				local err = cfg.hoverHeight * hover.blend - gap local desVy = hover.gv + math.clamp(err * 25, -30, 30)
+				local ka = 1 - math.exp(-dt * 30) vel = Vector3.new(vel.X, vel.Y + (desVy - vel.Y) * ka, vel.Z) dirtyV = true
+				local kt = math.exp(-5 * dt) w = Vector3.new(w.X * kt, w.Y, w.Z * kt) dirtyW = true hovering = true
+			else hover.gy = nil end
+		else hover.gy = nil end
+	else hover.gy = nil end
+	tele.hover = hovering
+	if dirtyV then root.AssemblyLinearVelocity = vel end if dirtyW then
+		root.AssemblyAngularVelocity = w end prevVel = vel tele.boosting = boosting tele.braking = braking and grounded tele.flat = flatSpeed return speed0
+end
+local steerLastOut = nil
+local steerEngine = 0
+local steerAcc = 0
+local function writeSteer(seat, floatValue, intValue) pcall(function() seat.SteerFloat = floatValue end) pcall(function() seat.Steer = intValue end)
+end
+RunService:BindToRenderStep(STEER_BIND, Enum.RenderPriority.Last.Value + 1, function() local seat = curSeat
+	if not seat or not seat:IsA("VehicleSeat") or cfg.forceTurn then steerLastOut = nil steerAcc = 0 tele.steerIn = 0 return end
+	local dir = (held.right and 1 or 0) - (held.left and 1 or 0) local okRead, sfv = pcall(function() return seat.SteerFloat end) if okRead then
+		if steerLastOut == nil or math.abs(sfv - steerLastOut) > 1e-3 then steerEngine = sfv end end local raw = dir ~= 0 and dir or steerEngine
+	tele.steerIn = raw local scaling = cfg.steerSense and cfg.seatSteerScale if dir ~= 0 or (scaling and math.abs(raw) > 1e-3) then local scaled = raw
+		if scaling then scaled = raw * steerFactor(tele.flat) end local out if scaling and math.abs(scaled) < 0.98 then
+			steerAcc = steerAcc + math.abs(scaled) out = 0 if steerAcc >= 1 then steerAcc = steerAcc - 1 out = scaled > 0 and 1 or -1 end else steerAcc = 0
+			out = scaled > 0.01 and 1 or (scaled < -0.01 and -1 or 0) end writeSteer(seat, scaled, out) steerLastOut = scaled elseif steerLastOut ~= nil then
+		steerLastOut = nil steerAcc = 0 writeSteer(seat, 0, 0) end end)
+local statusTimer = 0
+bind(RunService.Heartbeat, function(dt) dt = math.min(dt, 0.1) local seat = getSeat() local root = seat and seat.AssemblyRootPart curSeat = seat
+	if seat ~= lastSeat then lastSeat = seat tele.boosting, tele.braking, tele.grounded, tele.crash, tele.hover = false, false, true, false, false
+		tele.flat, tele.steerIn = 0, 0 steerLastOut, steerAcc = nil, 0 setHoverFriction(false) resetStabilityState() if seat then setupVehicle(seat, root)
+			collectHoverParts(seat) else hover.parts = {} end end local speed = 0
+	if seat and root and not root.Anchored then speed = driveVehicle(seat, root, dt) elseif root then speed = root.AssemblyLinearVelocity.Magnitude end
+	statusTimer = statusTimer + dt if statusTimer >= 0.1 then statusTimer = 0 if seat then local flags = "" if tele.boosting then
+				flags = flags .. "  BOOST" end if tele.braking then flags = flags .. "  BRAKE" end if tele.crash then flags = flags .. "  CRASH" end
+			if tele.hover then flags = flags .. "  HOVER" end
+			if cfg.stabEnabled and not tele.grounded then flags = flags .. "  AIR" end
+			statusLabel.Text = ("Vehicle: seated%s\nSpeed: %d km/h%s"):format(cfg.stabEnabled and "  |  STAB" or "", math.floor(speed * hover.K + 0.5), flags) else
+			statusLabel.Text = "Vehicle: none\nSit in a vehicle seat" end if tele.boosting then statusBar.BackgroundColor3 = cfg.colors.active
+		elseif tele.crash then statusBar.BackgroundColor3 = cfg.colors.brakeBtn elseif tele.braking then statusBar.BackgroundColor3 = cfg.colors.brakeBtn
+		else statusBar.BackgroundColor3 = seat and cfg.colors.accent or THEME.off end
+		toggleBtn.BackgroundColor3 = state.enabled and cfg.colors.active or cfg.colors.aiBtn for _, h in ipairs(holdList) do h.refresh() end
+		saveLabel.Text = saveInfo.text end end)
+bind(UserInputService.InputBegan, function(input, gameProcessed) if input.UserInputType ~= Enum.UserInputType.Keyboard then return end
+	if rebinding then local field = rebinding local other = field == "boostKey" and "brakeKey" or "boostKey" if input.KeyCode == Enum.KeyCode.Escape then
+			rebinding = nil refreshKeyButtons() elseif input.KeyCode == GUI_KEY then keyButtons[field].Text = "Reserved key"
+		elseif input.KeyCode == cfg[other] then keyButtons[field].Text = "Already used" elseif input.KeyCode ~= Enum.KeyCode.Unknown then
+			cfg[field] = input.KeyCode rebinding = nil keyHeld.boost, keyHeld.brake = false, false refreshKeyButtons() updateHint() end return end
+	if gameProcessed then return end if input.KeyCode == cfg.boostKey then keyHeld.boost = true elseif input.KeyCode == cfg.brakeKey then
+		keyHeld.brake = true elseif input.KeyCode == GUI_KEY then setOpen(not panelOpen) end end)
+bind(UserInputService.InputEnded, function(input) if input.KeyCode == cfg.boostKey then keyHeld.boost = false end
+	if input.KeyCode == cfg.brakeKey then keyHeld.brake = false end end)
+screenGui.Destroying:Connect(function() pcall(function() RunService:UnbindFromRenderStep(STEER_BIND) end) pcall(setHoverFriction, false) for _, c in ipairs(connections) do
+		c:Disconnect() end end)
+task.spawn(function() while screenGui and screenGui.Parent do task.wait(1.5) if cfg.autoSave then saveNow(false) end end end)
+bind(Players.PlayerRemoving, function(p) if p == player and cfg.autoSave then saveNow(false) end end)
+applyAll()
+setOpen(true)
